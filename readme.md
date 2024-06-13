@@ -9,6 +9,45 @@ Using `hyper` as a http server directly is easy, so there's not much here, mostl
 
 In my experience the main thing missing vs a larger http server framework is a router, i.e. an efficient prefix-based map so that dynamic paths can be matched.
 
+### Example
+
+```rust
+async fn handle_req(state: Arc<State>, req: Request<Incoming>) -> Result<Response<Body>, Infallible> {
+    return Ok(response_200());
+}
+
+let mut listener = TcpSocket::bind(&addr)?;
+while let Some((conn, _)) = listener.accept().await.ok() {
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            match async move {
+                hyper_util::server::conn::auto::Builder::new(
+                    hyper_util::rt::TokioExecutor::new(),
+                )
+                    .serve_connection(
+                        hyper_util::rt::TokioIo::new(conn),
+                        hyper::service::service_fn(move |req| handle_req(state, req)),
+                    )
+                    .await
+                    .map_err(
+                        |e| loga::err_with(
+                            "Error serving HTTP on connection",
+                            ea!(err = e.to_string()),
+                        ),
+                    )?;
+                return Ok(()) as Result<(), loga::Error>;
+            }.await {
+                Ok(_) => (),
+                Err(e) => {
+                    log.log_err(StandardFlag::Debug, e.context("Error serving connection"));
+                },
+            }
+        }
+    });
+}
+```
+
 ## Client
 
 Requests are split in to three stages and there are functions for each:

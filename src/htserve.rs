@@ -40,7 +40,7 @@ pub fn body_json(data: impl Serialize) -> Body {
 }
 
 pub fn response_400(message: impl ToString) -> Response<Body> {
-    return Response::builder().status(400).body(body_full(message.to_string().as_bytes().to_vec())).unwrap();
+    return Response::builder().status(400).body(body_full(message.to_string().into_bytes())).unwrap();
 }
 
 pub fn response_200() -> Response<Body> {
@@ -61,6 +61,10 @@ pub fn response_401() -> Response<Body> {
 
 pub fn response_503() -> Response<Body> {
     return Response::builder().status(503).body(body_empty()).unwrap();
+}
+
+pub fn response_503_text(message: impl ToString) -> Response<Body> {
+    return Response::builder().status(503).body(body_full(message.to_string().into_bytes())).unwrap();
 }
 
 pub fn get_auth_token(headers: &HeaderMap) -> Result<String, loga::Error> {
