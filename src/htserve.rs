@@ -28,11 +28,15 @@ use tokio::{
 pub type Body = BoxBody<Bytes, std::io::Error>;
 
 pub fn body_empty() -> Body {
-    return http_body_util::Full::new(Bytes::new()).map_err(|_| std::io::Error::other("")).boxed();
+    return http_body_util::Full::new(Bytes::new())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, ""))
+        .boxed();
 }
 
 pub fn body_full(data: Vec<u8>) -> Body {
-    return http_body_util::Full::new(Bytes::from(data)).map_err(|_| std::io::Error::other("")).boxed();
+    return http_body_util::Full::new(Bytes::from(data))
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, ""))
+        .boxed();
 }
 
 pub fn body_json(data: impl Serialize) -> Body {
