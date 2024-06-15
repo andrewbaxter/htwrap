@@ -1,30 +1,12 @@
 use {
-    std::{
-        collections::HashMap,
-        str::FromStr,
-        net::{
-            IpAddr,
-            Ipv6Addr,
-            Ipv4Addr,
-        },
-        sync::OnceLock,
-    },
-    chrono::{
-        Duration,
-    },
-    futures::{
-        future::{
-            join_all,
-        },
-    },
+    chrono::Duration,
+    futures::future::join_all,
     hickory_resolver::config::LookupIpStrategy,
-    http::{
-        header::AUTHORIZATION,
-    },
+    http::header::AUTHORIZATION,
     http_body_util::{
-        Limited,
         BodyExt,
         Full,
+        Limited,
     },
     hyper::{
         body::Bytes,
@@ -38,12 +20,13 @@ use {
         Uri,
     },
     hyper_rustls::{
-        HttpsConnectorBuilder,
         ConfigBuilderExt,
+        HttpsConnectorBuilder,
     },
     loga::{
         ea,
         DebugDisplay,
+        Log,
         ResultContext,
     },
     rand::{
@@ -54,6 +37,16 @@ use {
     serde::{
         de::DeserializeOwned,
         Serialize,
+    },
+    std::{
+        collections::HashMap,
+        net::{
+            IpAddr,
+            Ipv4Addr,
+            Ipv6Addr,
+        },
+        str::FromStr,
+        sync::OnceLock,
     },
     tokio::{
         io::{
@@ -69,10 +62,6 @@ use {
         time::sleep,
     },
     tower_service::Service,
-    crate::util::{
-        Flag,
-        Log,
-    },
 };
 
 /// Get a once-initialized rustls native roots client config, avoiding scanning the
@@ -90,29 +79,26 @@ pub fn rustls_client_config() -> rustls::ClientConfig {
 
 /// This is a light wrapper around a connection to allow mut-ref access rather than
 /// moving.
-pub struct Conn {
-    inner: Option<
+pub struct Conn<B: 'static + http_body::Body = Full<Bytes>> {
+    pub inner: Option<
         (
-            SendRequest<Full<Bytes>>,
-            Connection<
-                hyper_rustls::MaybeHttpsStream<hyper_util::rt::tokio::TokioIo<tokio::net::TcpStream>>,
-                Full<Bytes>,
-            >,
+            SendRequest<B>,
+            Connection<hyper_rustls::MaybeHttpsStream<hyper_util::rt::tokio::TokioIo<tokio::net::TcpStream>>, B>,
         ),
     >,
 }
 
-impl Conn {
+impl<B: 'static + http_body::Body> Conn<B> {
     /// For typical use cases you'll want to use `connect()` to create a `Conn`, but if
     /// you're setting up the connection manually you can use this to produce a `Conn`
     /// object.  This takes the return of `hyper::client::conn::http1::handshake`.
     pub fn new(
         c:
             (
-                SendRequest<Full<Bytes>>,
+                SendRequest<B>,
                 Connection<
                     hyper_rustls::MaybeHttpsStream<hyper_util::rt::tokio::TokioIo<tokio::net::TcpStream>>,
-                    Full<Bytes>,
+                    B,
                 >,
             ),
     ) -> Self {
@@ -170,7 +156,11 @@ pub fn uri_parts(url: &Uri) -> Result<(String, HostPart, u16), loga::Error> {
 ///
 /// This does something like "happy eyes" for resolving ipv6 and ipv4 addresses for
 /// non-ip hostnames, using the `hickory` library for dns resolution.
-pub async fn connect(base_url: &Uri) -> Result<Conn, loga::Error> {
+pub async fn connect<
+    D: hyper::body::Buf + Send,
+    E: 'static + std::error::Error + Send + Sync,
+    B: 'static + http_body::Body<Data = D, Error = E>,
+>(base_url: &Uri) -> Result<Conn<B>, loga::Error> {
     let log = &Log::new().fork(ea!(url = base_url));
     let (scheme, host, port) = uri_parts(base_url).stack_context(log, "Incomplete url")?;
     let mut ipv4s = vec![];
@@ -299,14 +289,11 @@ pub async fn connect(base_url: &Uri) -> Result<Conn, loga::Error> {
 }
 
 #[must_use]
-pub struct ContinueSend<'a> {
+pub struct ContinueSend<'a, B: 'static + http_body::Body> {
     body: hyper::body::Incoming,
-    conn_send: SendRequest<Full<Bytes>>,
-    conn_bg: Connection<
-        hyper_rustls::MaybeHttpsStream<hyper_util::rt::TokioIo<tokio::net::TcpStream>>,
-        Full<Bytes>,
-    >,
-    conn: &'a mut Conn,
+    conn_send: SendRequest<B>,
+    conn_bg: Connection<hyper_rustls::MaybeHttpsStream<hyper_util::rt::TokioIo<tokio::net::TcpStream>>, B>,
+    conn: &'a mut Conn<B>,
 }
 
 /// Send a request on a connection, return the header and a `ContinueSend` object
@@ -314,12 +301,15 @@ pub struct ContinueSend<'a> {
 /// connection will be closed.
 pub async fn send<
     'a,
+    D: hyper::body::Buf + Send,
+    E: 'static + std::error::Error + Send + Sync,
+    B: 'static + http_body::Body<Data = D, Error = E>,
 >(
     log: &Log,
-    conn: &'a mut Conn,
+    conn: &'a mut Conn<B>,
     max_time: Duration,
-    req: Request<Full<Bytes>>,
-) -> Result<(StatusCode, HeaderMap, ContinueSend<'a>), loga::Error> {
+    req: Request<B>,
+) -> Result<(StatusCode, HeaderMap, ContinueSend<'a, B>), loga::Error> {
     let Some((mut conn_send, mut conn_bg)) = conn.inner.take() else {
         return Err(loga::err("Connection already lost"));
     };
@@ -349,7 +339,7 @@ pub async fn send<
         x = read => x ?,
     };
     log.log_with(
-        Flag::Debug,
+        loga::DEBUG,
         "Receive (streamed)",
         ea!(method = method, url = url, status = status, headers = headers.dbg_str()),
     );
@@ -375,7 +365,10 @@ pub async fn send<
 /// Stream the response body (returned by `send`) to the provided writer.
 pub async fn receive_stream<
     'a,
->(mut continue_send: ContinueSend<'a>, mut writer: impl Unpin + AsyncWrite) -> Result<(), loga::Error> {
+    D: hyper::body::Buf + Send,
+    E: 'static + std::error::Error + Send + Sync,
+    B: 'static + http_body::Body<Data = D, Error = E>,
+>(mut continue_send: ContinueSend<'a, B>, mut writer: impl Unpin + AsyncWrite) -> Result<(), loga::Error> {
     let (chan_tx, mut chan_rx) = channel(10);
     let work_read = async {
         loop {
@@ -425,7 +418,10 @@ pub async fn receive_stream<
 /// Read the entire body into memory, return as a byte vec.
 pub async fn receive<
     'a,
->(mut continue_send: ContinueSend<'a>, max_size: usize, max_time: Duration) -> Result<Vec<u8>, loga::Error> {
+    D: hyper::body::Buf + Send,
+    E: 'static + std::error::Error + Send + Sync,
+    B: 'static + http_body::Body<Data = D, Error = E>,
+>(mut continue_send: ContinueSend<'a, B>, max_size: usize, max_time: Duration) -> Result<Vec<u8>, loga::Error> {
     let read = async move {
         let work = Limited::new(continue_send.body, max_size).collect();
         let body = select!{
@@ -447,12 +443,16 @@ pub async fn receive<
 }
 
 /// Send and read the response body into memory as a single call.
-pub async fn send_simple(
+pub async fn send_simple<
+    D: hyper::body::Buf + Send,
+    E: 'static + std::error::Error + Send + Sync,
+    B: 'static + http_body::Body<Data = D, Error = E>,
+>(
     log: &Log,
-    conn: &mut Conn,
+    conn: &mut Conn<B>,
     max_size: usize,
     max_time: Duration,
-    req: Request<Full<Bytes>>,
+    req: Request<B>,
 ) -> Result<Vec<u8>, loga::Error> {
     let work = async {
         let (code, _, continue_send) = send(log, conn, max_time, req).await?;
@@ -473,7 +473,6 @@ pub async fn send_simple(
     return Ok(body);
 }
 
-/// Send
 pub async fn post(
     log: &Log,
     conn: &mut Conn,
@@ -488,7 +487,7 @@ pub async fn post(
         req = req.header(k, v);
     }
     log.log_with(
-        Flag::Debug,
+        loga::DEBUG,
         "Send",
         ea!(method = "POST", url = url, headers = req.headers_ref().dbg_str(), body = String::from_utf8_lossy(&body)),
     );
@@ -525,4 +524,76 @@ pub fn auth_token_headers(token: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
     out.insert(AUTHORIZATION.to_string(), token.to_string());
     return out;
+}
+
+pub async fn get(
+    log: &Log,
+    conn: &mut Conn,
+    url: &Uri,
+    headers: &HashMap<String, String>,
+    max_size: usize,
+) -> Result<Vec<u8>, loga::Error> {
+    let req = Request::builder();
+    const METHOD: &'static str = "GET";
+    let mut req = req.method(METHOD).uri(url.clone());
+    for (k, v) in headers.iter() {
+        req = req.header(k, v);
+    }
+    return Ok(
+        send_simple(
+            log,
+            conn,
+            max_size,
+            Duration::seconds(10),
+            req.body(Full::<Bytes>::new(Bytes::new())).unwrap(),
+        )
+            .await
+            .context_with("Error sending GET", ea!(url = url))?,
+    );
+}
+
+pub async fn get_text(
+    log: &Log,
+    conn: &mut Conn,
+    url: &Uri,
+    headers: &HashMap<String, String>,
+    max_size: usize,
+) -> Result<String, loga::Error> {
+    let body = get(log, conn, url, headers, max_size).await?;
+    return Ok(
+        String::from_utf8(
+            body,
+        ).map_err(
+            |e| loga::err_with(
+                "Received data isn't valid utf-8",
+                ea!(err = e.to_string(), body = String::from_utf8_lossy(e.as_bytes())),
+            ),
+        )?,
+    );
+}
+
+pub async fn delete(
+    log: &Log,
+    conn: &mut Conn,
+    url: &Uri,
+    headers: &HashMap<String, String>,
+    max_size: usize,
+) -> Result<Vec<u8>, loga::Error> {
+    let req = Request::builder();
+    const METHOD: &'static str = "DELETE";
+    let mut req = req.method(METHOD).uri(url.clone());
+    for (k, v) in headers.iter() {
+        req = req.header(k, v);
+    }
+    return Ok(
+        send_simple(
+            log,
+            conn,
+            max_size,
+            Duration::seconds(10),
+            req.body(Full::<Bytes>::new(Bytes::new())).unwrap(),
+        )
+            .await
+            .context_with("Error sending DELETE", ea!(url = url))?,
+    );
 }

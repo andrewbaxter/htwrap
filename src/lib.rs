@@ -15,7 +15,6 @@ use {
 
 pub mod htreq;
 pub mod htserve;
-pub(crate) mod util;
 
 pub trait UriJoin {
     fn join(&self, other: impl TryInto<Uri, Error = InvalidUri>) -> Uri;
