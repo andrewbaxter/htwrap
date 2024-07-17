@@ -66,7 +66,7 @@ use {
 
 /// Get a once-initialized rustls native roots client config, avoiding scanning the
 /// filesystem multiple times.
-pub fn rustls_client_config() -> rustls::ClientConfig {
+pub fn default_tls() -> rustls::ClientConfig {
     static S: OnceLock<rustls::ClientConfig> = OnceLock::new();
     return S.get_or_init(move || {
         ClientConfig::builder()
@@ -106,20 +106,29 @@ impl<B: 'static + http_body::Body> Conn<B> {
     }
 }
 
-pub enum HostPart {
+pub enum Host {
     Ip(IpAddr),
     Name(String),
 }
 
+impl std::fmt::Display for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Host::Ip(i) => return i.fmt(f),
+            Host::Name(i) => return i.fmt(f),
+        }
+    }
+}
+
 /// Return the scheme, host, and numeric port from a URI. This should be simple,
 /// but it unexpectedly needs some parsing due to the Uri interface.
-pub fn uri_parts(url: &Uri) -> Result<(String, HostPart, u16), loga::Error> {
+pub fn uri_parts(url: &Uri) -> Result<(String, Host, u16), loga::Error> {
     let host = url.host().context("Url is missing host")?;
     if host.is_empty() {
         return Err(loga::err("Host portion of url is empty"));
     }
     let host = if host.as_bytes()[0] as char == '[' {
-        HostPart::Ip(
+        Host::Ip(
             IpAddr::V6(
                 Ipv6Addr::from_str(
                     &String::from_utf8(
@@ -135,9 +144,9 @@ pub fn uri_parts(url: &Uri) -> Result<(String, HostPart, u16), loga::Error> {
             ),
         )
     } else if host.as_bytes().iter().all(|b| (*b as char) == '.' || ('0' ..= '9').contains(&(*b as char))) {
-        HostPart::Ip(IpAddr::V4(Ipv4Addr::from_str(host).context("Invalid ipv4 address in URL")?))
+        Host::Ip(IpAddr::V4(Ipv4Addr::from_str(host).context("Invalid ipv4 address in URL")?))
     } else {
-        HostPart::Name(host.to_string())
+        Host::Name(host.to_string())
     };
     let scheme = url.scheme().context("Url is missing scheme")?.to_string();
     let port = match url.port_u16() {
@@ -151,38 +160,47 @@ pub fn uri_parts(url: &Uri) -> Result<(String, HostPart, u16), loga::Error> {
     return Ok((scheme, host, port));
 }
 
-/// Creates a new HTTPS/HTTP connection with default settings.  `base_uri` is just
-/// used for schema, host, and port.
-///
-/// This does something like "happy eyes" for resolving ipv6 and ipv4 addresses for
-/// non-ip hostnames, using the `hickory` library for dns resolution.
-pub async fn connect<
-    D: hyper::body::Buf + Send,
-    E: 'static + std::error::Error + Send + Sync,
-    B: 'static + http_body::Body<Data = D, Error = E>,
->(base_url: &Uri) -> Result<Conn<B>, loga::Error> {
-    let log = &Log::new().fork(ea!(url = base_url));
-    let (scheme, host, port) = uri_parts(base_url).stack_context(log, "Incomplete url")?;
+pub struct Ips {
+    pub ipv4s: Vec<IpAddr>,
+    pub ipv6s: Vec<IpAddr>,
+}
+
+impl From<IpAddr> for Ips {
+    fn from(value: IpAddr) -> Self {
+        match &value {
+            IpAddr::V4(_) => return Ips {
+                ipv4s: vec![value],
+                ipv6s: vec![],
+            },
+            IpAddr::V6(_) => return Ips {
+                ipv4s: vec![],
+                ipv6s: vec![value],
+            },
+        }
+    }
+}
+
+/// Resolve ipv4 and ipv6 addresses for a url using hickory.
+pub async fn resolve(host: &Host) -> Result<Ips, loga::Error> {
     let mut ipv4s = vec![];
     let mut ipv6s = vec![];
-    let host = match host {
-        HostPart::Ip(i) => {
+    match host {
+        Host::Ip(i) => {
             match i {
-                IpAddr::V4(_) => ipv4s.push(i),
-                IpAddr::V6(_) => ipv6s.push(i),
-            }
-            i.to_string()
+                IpAddr::V4(_) => ipv4s.push(*i),
+                IpAddr::V6(_) => ipv6s.push(*i),
+            };
         },
-        HostPart::Name(host) => {
+        Host::Name(host) => {
             let (hickory_config, mut hickory_options) =
                 hickory_resolver
                 ::system_conf
-                ::read_system_conf().stack_context(log, "Error reading system dns resolver config for http request")?;
+                ::read_system_conf().context("Error reading system dns resolver config for http request")?;
             hickory_options.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
             for ip in hickory_resolver::TokioAsyncResolver::tokio(hickory_config, hickory_options)
                 .lookup_ip(&format!("{}.", host))
                 .await
-                .stack_context(log, "Failed to look up lookup host ip addresses")? {
+                .context("Failed to look up lookup host ip addresses")? {
                 match ip {
                     std::net::IpAddr::V4(_) => {
                         ipv4s.push(ip);
@@ -191,8 +209,7 @@ pub async fn connect<
                         ipv6s.push(ip);
                     },
                 }
-            }
-            host
+            };
         },
     };
     {
@@ -200,20 +217,35 @@ pub async fn connect<
         ipv4s.shuffle(&mut r);
         ipv6s.shuffle(&mut r);
     }
+    return Ok(Ips {
+        ipv4s: ipv4s,
+        ipv6s: ipv6s,
+    });
+}
+
+/// Create a connection to a host. This does something like "happy eyes" where ipv4
+/// and ipv6 connections are attempted in parallel with the first to succeed
+/// returned.
+pub async fn connect_ips<
+    D: hyper::body::Buf + Send,
+    E: 'static + std::error::Error + Send + Sync,
+    B: 'static + http_body::Body<Data = D, Error = E>,
+>(ips: Ips, tls: rustls::ClientConfig, scheme: String, host: Host, port: u16) -> Result<Conn<B>, loga::Error> {
     let mut bg = vec![];
     let (found_tx, mut found_rx) = mpsc::channel(1);
-    for ips in [ipv6s, ipv4s] {
+    for ips in [ips.ipv6s, ips.ipv4s] {
         bg.push({
             let found_tx = found_tx.clone();
             let scheme = &scheme;
             let host = &host;
+            let tls = tls.clone();
             async move {
                 let mut errs = vec![];
                 for ip in &ips {
                     let connect = async {
                         return Ok(
                             HttpsConnectorBuilder::new()
-                                .with_tls_config(rustls_client_config())
+                                .with_tls_config(tls.clone())
                                 .https_or_http()
                                 .with_server_name(host.to_string())
                                 .enable_http1()
@@ -271,7 +303,7 @@ pub async fn connect<
         }
     };
     if results.is_empty() {
-        return Err(log.err("No addresses found when looking up host"));
+        return Err(loga::err("No addresses found when looking up host"));
     }
     let mut failed = vec![];
     for res in results {
@@ -285,7 +317,38 @@ pub async fn connect<
             },
         }
     }
-    return Err(log.agg_err("Unable to connect to host", failed));
+    return Err(loga::agg_err("Unable to connect to host", failed));
+}
+
+/// Creates a new HTTPS/HTTP connection with default settings.  `base_uri` is just
+/// used for schema, host, and port.
+pub async fn connect<
+    D: hyper::body::Buf + Send,
+    E: 'static + std::error::Error + Send + Sync,
+    B: 'static + http_body::Body<Data = D, Error = E>,
+>(base_url: &Uri) -> Result<Conn<B>, loga::Error> {
+    let log = &Log::new().fork(ea!(url = base_url));
+    let (scheme, host, port) = uri_parts(base_url).stack_context(log, "Incomplete url")?;
+    let ips = resolve(&host).await.stack_context(log, "Error resolving ips for url")?;
+    return Ok(
+        connect_ips(ips, default_tls(), scheme, host, port)
+            .await
+            .stack_context(log, "Failed to establish connection")?,
+    );
+}
+
+/// Like `connect` but with a specified tls config.
+pub async fn connect_with_tls<
+    D: hyper::body::Buf + Send,
+    E: 'static + std::error::Error + Send + Sync,
+    B: 'static + http_body::Body<Data = D, Error = E>,
+>(base_url: &Uri, tls: rustls::ClientConfig) -> Result<Conn<B>, loga::Error> {
+    let log = &Log::new().fork(ea!(url = base_url));
+    let (scheme, host, port) = uri_parts(base_url).stack_context(log, "Incomplete url")?;
+    let ips = resolve(&host).await.stack_context(log, "Error resolving ips for url")?;
+    return Ok(
+        connect_ips(ips, tls, scheme, host, port).await.stack_context(log, "Failed to establish connection")?,
+    );
 }
 
 #[must_use]
@@ -473,6 +536,7 @@ pub async fn send_simple<
     return Ok(body);
 }
 
+/// Send a `POST` request, return body as `Vec<u8>`.
 pub async fn post(
     log: &Log,
     conn: &mut Conn,
@@ -526,6 +590,7 @@ pub fn auth_token_headers(token: &str) -> HashMap<String, String> {
     return out;
 }
 
+/// Make a GET request, return body as `Vec<u8>`.
 pub async fn get(
     log: &Log,
     conn: &mut Conn,
@@ -544,7 +609,7 @@ pub async fn get(
             log,
             conn,
             max_size,
-            Duration::seconds(10),
+            Duration::try_seconds(10).unwrap(),
             req.body(Full::<Bytes>::new(Bytes::new())).unwrap(),
         )
             .await
@@ -552,6 +617,7 @@ pub async fn get(
     );
 }
 
+/// Make a GET request, return body as String.
 pub async fn get_text(
     log: &Log,
     conn: &mut Conn,
@@ -572,6 +638,21 @@ pub async fn get_text(
     );
 }
 
+/// Make a GET request and decode body as JSON before returning.
+pub async fn get_json<
+    T: DeserializeOwned,
+>(
+    log: &Log,
+    conn: &mut Conn,
+    url: &Uri,
+    headers: &HashMap<String, String>,
+    max_size: usize,
+) -> Result<T, loga::Error> {
+    let res = get(log, conn, url, headers, max_size).await?;
+    return Ok(serde_json::from_slice(&res).context_with("Error deserializing response as json", ea!(url = url))?);
+}
+
+/// Make a `DELETE` request, return body as `Vec<u8>`.
 pub async fn delete(
     log: &Log,
     conn: &mut Conn,
@@ -590,7 +671,7 @@ pub async fn delete(
             log,
             conn,
             max_size,
-            Duration::seconds(10),
+            Duration::try_seconds(10).unwrap(),
             req.body(Full::<Bytes>::new(Bytes::new())).unwrap(),
         )
             .await
