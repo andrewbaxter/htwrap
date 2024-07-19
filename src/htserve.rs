@@ -1,28 +1,57 @@
-use std::path::Path;
-use futures::TryStreamExt;
-use http::{
-    header::AUTHORIZATION,
-    HeaderMap,
-    Response,
-};
-use http_body::Frame;
-use http_body_util::{
-    combinators::BoxBody,
-    BodyExt,
-};
-use hyper::body::Bytes;
-use loga::{
-    ea,
-    ErrContext,
-    ResultContext,
-};
-use serde::Serialize;
-use tokio::{
-    fs::File,
-    io::{
-        AsyncReadExt,
-        AsyncSeekExt,
+use {
+    futures::{
+        TryStreamExt,
     },
+    http::{
+        header::AUTHORIZATION,
+        HeaderMap,
+        Response,
+        StatusCode,
+    },
+    http_body::Frame,
+    http_body_util::{
+        combinators::BoxBody,
+        BodyExt,
+    },
+    hyper::{
+        body::{
+            Bytes,
+            Incoming,
+        },
+        service::service_fn,
+    },
+    hyper_util::rt::{
+        TokioExecutor,
+        TokioIo,
+    },
+    loga::{
+        ea,
+        ErrContext,
+        Log,
+        ResultContext,
+    },
+    rustls::{
+        server::ResolvesServerCert,
+        ServerConfig,
+    },
+    serde::Serialize,
+    std::{
+        collections::BTreeMap,
+        net::SocketAddr,
+        path::Path,
+        sync::Arc,
+    },
+    tokio::{
+        fs::File,
+        io::{
+            AsyncRead,
+            AsyncReadExt,
+            AsyncSeekExt,
+            AsyncWrite,
+        },
+        net::TcpStream,
+    },
+    tokio_rustls::TlsAcceptor,
 };
 
 pub type Body = BoxBody<Bytes, std::io::Error>;
@@ -71,6 +100,9 @@ pub fn response_503_text(message: impl ToString) -> Response<Body> {
     return Response::builder().status(503).body(body_full(message.to_string().into_bytes())).unwrap();
 }
 
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub struct AuthTokenHash(sha2::digest::Output<sha2::Sha256>);
+
 pub fn get_auth_token(headers: &HeaderMap) -> Result<String, loga::Error> {
     const AUTH_PREFIX: &'static str = "Bearer ";
     return Ok(
@@ -83,6 +115,14 @@ pub fn get_auth_token(headers: &HeaderMap) -> Result<String, loga::Error> {
             .context(&format!("Missing {} prefix", AUTH_PREFIX))?
             .to_string(),
     );
+}
+
+pub fn hash_auth_token(s: &str) -> AuthTokenHash {
+    return AuthTokenHash(<sha2::Sha256 as sha2::Digest>::digest(s.as_bytes()));
+}
+
+pub fn check_auth_token_hash(want: &AuthTokenHash, got: &str) -> bool {
+    return &hash_auth_token(got) == want;
 }
 
 pub async fn response_file(
@@ -227,4 +267,178 @@ pub async fn response_file(
                 .unwrap(),
         );
     }
+}
+
+pub struct HandlerArgs<'a> {
+    pub peer_addr: SocketAddr,
+    /// Zero or more segments preceeded by `/`. Never ends with `/`.
+    pub subpath: &'a str,
+    /// The query string not including `?`.
+    pub query: &'a str,
+    pub head: &'a http::request::Parts,
+    pub body: Incoming,
+}
+
+/// A generic http request handler trait to ease composition.
+#[async_trait::async_trait]
+pub trait Handler<O>: 'static + Send + Sync {
+    async fn handle(&self, args: HandlerArgs<'_>) -> Response<O>;
+}
+
+/// Republish for `handler` macro
+pub use async_trait;
+
+/// Build a handler from captured values and a body.
+#[macro_export]
+macro_rules! handler{
+    (($($i: ident: $it: ty), *)($r: ident -> $o: ty) $b: expr) => {
+        {
+            struct Impl {
+                $($i: $it,) *
+            };
+            #[$crate:: htserve:: async_trait:: async_trait] impl $crate:: htserve:: Handler < $o > for Impl {
+                async fn handle(&self, $r: $crate:: htserve:: HandlerArgs < '_ >) -> http:: response:: Response < $o > {
+                    $(let $i =& self.$i;) * 
+                    //. .
+                    $b
+                }
+            }
+            Impl {
+                $($i: $i.clone()),
+                *
+            }
+        }
+    };
+}
+
+fn check_path_router_key(k: &str) -> bool {
+    return k == "" || (k.starts_with("/") && !k.ends_with("/"));
+}
+
+/// A minimal path-based request router using the `Handler` trait.
+pub struct PathRouter<O>(BTreeMap<String, Box<dyn Handler<O>>>);
+
+impl<O> Default for PathRouter<O> {
+    fn default() -> Self {
+        return Self(Default::default());
+    }
+}
+
+impl<O> PathRouter<O> {
+    pub fn new(routes: BTreeMap<String, Box<dyn Handler<O>>>) -> Self {
+        assert!(routes.keys().all(|x| check_path_router_key(&x)));
+        return Self(routes);
+    }
+
+    pub fn insert(&mut self, key: impl AsRef<str>, handler: Box<dyn Handler<O>>) {
+        let key = key.as_ref().to_string();
+        assert!(check_path_router_key(&key));
+        self.0.insert(key, handler);
+    }
+}
+
+#[async_trait::async_trait]
+impl<O: 'static + Send + Default> Handler<O> for PathRouter<O> {
+    async fn handle(&self, args: HandlerArgs<'_>) -> Response<O> {
+        let Some((prefix, subhandler)) = self.0.range(..=args.subpath.to_string()).rev().next() else {
+            return Response::builder().status(StatusCode::NOT_FOUND).body(Default::default()).unwrap();
+        };
+        let Some(subpath) = args.subpath.strip_prefix(prefix) else {
+            return Response::builder().status(StatusCode::NOT_FOUND).body(Default::default()).unwrap();
+        };
+        return subhandler.handle(HandlerArgs {
+            peer_addr: args.peer_addr,
+            subpath: subpath,
+            query: args.query,
+            head: args.head,
+            body: args.body,
+        }).await;
+    }
+}
+
+pub fn root_handle_http_inner<
+    I: 'static + Send + AsyncRead + AsyncWrite + Unpin,
+    OD: 'static + Send,
+    OE: 'static + Send + Sync + std::error::Error,
+    O: 'static + Send + http_body::Body<Data = OD, Error = OE>,
+>(log: &Log, peer_addr: SocketAddr, stream: I, handler: Arc<dyn Handler<O>>) {
+    let log = log.clone();
+    tokio::task::spawn(async move {
+        match async {
+            hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(stream), service_fn({
+                    move |req| {
+                        let handler = handler.clone();
+                        async move {
+                            let (head, body) = req.into_parts();
+                            let path;
+                            let query;
+                            match head.uri.path_and_query() {
+                                Some(pq) => {
+                                    path = pq.path().trim_end_matches('/');
+                                    query = pq.query().unwrap_or_default();
+                                },
+                                None => {
+                                    path = "";
+                                    query = "";
+                                },
+                            }
+                            return Ok(handler.handle(HandlerArgs {
+                                peer_addr: peer_addr,
+                                subpath: path,
+                                query: query,
+                                head: &head,
+                                body: body,
+                            }).await) as Result<_, std::io::Error>;
+                        }
+                    }
+                }))
+                .await
+                .map_err(|_| loga::err("Unknown error serving connection"))?;
+            return Ok(()) as Result<(), loga::Error>;
+        }.await {
+            Ok(_) => (),
+            Err(e) => {
+                log.log_err(loga::DEBUG, e.context("Error serving connection"));
+            },
+        }
+    });
+}
+
+pub async fn root_handle_http<
+    OD: 'static + Send,
+    OE: 'static + Send + Sync + std::error::Error,
+    O: 'static + Send + http_body::Body<Data = OD, Error = OE>,
+>(log: &Log, handler: Arc<dyn Handler<O>>, stream: TcpStream) -> Result<(), loga::Error> {
+    let peer_addr = stream.peer_addr().context("Error getting connection peer address")?;
+    root_handle_http_inner(log, peer_addr, stream, handler);
+    return Ok(());
+}
+
+pub fn tls_acceptor(certs: Arc<dyn ResolvesServerCert>) -> TlsAcceptor {
+    return TlsAcceptor::from(Arc::new({
+        let mut server_config = ServerConfig::builder().with_no_client_auth().with_cert_resolver(certs);
+        server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec(), b"http/1.0".to_vec()];
+        server_config
+    }));
+}
+
+pub async fn root_handle_https<
+    OD: 'static + Send,
+    OE: 'static + Send + Sync + std::error::Error,
+    O: 'static + Send + http_body::Body<Data = OD, Error = OE>,
+>(
+    log: &Log,
+    tls_acceptor: TlsAcceptor,
+    handler: Arc<dyn Handler<O>>,
+    stream: TcpStream,
+) -> Result<(), loga::Error> {
+    let peer_addr = stream.peer_addr().context("Error getting connection peer address")?;
+    root_handle_http_inner(
+        log,
+        peer_addr,
+        tls_acceptor.accept(stream).await.context("Error establishing TLS connection")?,
+        handler,
+    );
+    return Ok(());
 }
