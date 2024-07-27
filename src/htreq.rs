@@ -106,6 +106,7 @@ impl<B: 'static + http_body::Body> Conn<B> {
     }
 }
 
+#[derive(Clone)]
 pub enum Host {
     Ip(IpAddr),
     Name(String),
@@ -160,21 +161,31 @@ pub fn uri_parts(url: &Uri) -> Result<(String, Host, u16), loga::Error> {
     return Ok((scheme, host, port));
 }
 
+#[derive(Clone)]
 pub struct Ips {
-    pub ipv4s: Vec<IpAddr>,
-    pub ipv6s: Vec<IpAddr>,
+    pub ipv4s: Vec<Ipv4Addr>,
+    pub ipv6s: Vec<Ipv6Addr>,
+}
+
+impl Ips {
+    pub fn push(&mut self, addr: IpAddr) {
+        match addr {
+            IpAddr::V4(a) => self.ipv4s.push(a),
+            IpAddr::V6(a) => self.ipv6s.push(a),
+        }
+    }
 }
 
 impl From<IpAddr> for Ips {
     fn from(value: IpAddr) -> Self {
         match &value {
-            IpAddr::V4(_) => return Ips {
-                ipv4s: vec![value],
+            IpAddr::V4(a) => return Ips {
+                ipv4s: vec![*a],
                 ipv6s: vec![],
             },
-            IpAddr::V6(_) => return Ips {
+            IpAddr::V6(a) => return Ips {
                 ipv4s: vec![],
-                ipv6s: vec![value],
+                ipv6s: vec![*a],
             },
         }
     }
@@ -187,8 +198,8 @@ pub async fn resolve(host: &Host) -> Result<Ips, loga::Error> {
     match host {
         Host::Ip(i) => {
             match i {
-                IpAddr::V4(_) => ipv4s.push(*i),
-                IpAddr::V6(_) => ipv6s.push(*i),
+                IpAddr::V4(i) => ipv4s.push(*i),
+                IpAddr::V6(i) => ipv6s.push(*i),
             };
         },
         Host::Name(host) => {
@@ -202,10 +213,10 @@ pub async fn resolve(host: &Host) -> Result<Ips, loga::Error> {
                 .await
                 .context("Failed to look up lookup host ip addresses")? {
                 match ip {
-                    std::net::IpAddr::V4(_) => {
+                    std::net::IpAddr::V4(ip) => {
                         ipv4s.push(ip);
                     },
-                    std::net::IpAddr::V6(_) => {
+                    std::net::IpAddr::V6(ip) => {
                         ipv6s.push(ip);
                     },
                 }
@@ -233,7 +244,10 @@ pub async fn connect_ips<
 >(ips: Ips, tls: rustls::ClientConfig, scheme: String, host: Host, port: u16) -> Result<Conn<B>, loga::Error> {
     let mut bg = vec![];
     let (found_tx, mut found_rx) = mpsc::channel(1);
-    for ips in [ips.ipv6s, ips.ipv4s] {
+    for ips in [
+        ips.ipv6s.into_iter().map(|x| IpAddr::V6(x)).collect::<Vec<_>>(),
+        ips.ipv4s.into_iter().map(|x| IpAddr::V4(x)).collect::<Vec<_>>(),
+    ] {
         bg.push({
             let found_tx = found_tx.clone();
             let scheme = &scheme;
