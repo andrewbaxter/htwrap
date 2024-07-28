@@ -41,6 +41,7 @@ impl UriJoin for Uri {
             // Other has scheme (`x://`)
             return other;
         }
+        let path_and_query = other.path_and_query().cloned().unwrap_or_else(|| PathAndQuery::from_static("/"));
 
         // Other has no scheme...
         if let Some(authority) = other.authority() {
@@ -50,14 +51,13 @@ impl UriJoin for Uri {
             let mut parts = Parts::default();
             parts.scheme = self.scheme().cloned();
             parts.authority = Some(authority.clone());
-            parts.path_and_query = other.path_and_query().cloned();
+            parts.path_and_query = Some(path_and_query);
             return Uri::from_parts(parts)
                 .context_with("Failed to create URI from parts", ea!(own = self, other = other))
                 .unwrap();
         }
 
         // Other has no scheme and no host...
-        let path_and_query = other.path_and_query().cloned().unwrap_or_else(|| PathAndQuery::from_static("/"));
         if let Some(own_path_and_query) = self.path_and_query() {
             // Self has path and query, need to join path
             let path = if path_and_query.path().is_empty() {
