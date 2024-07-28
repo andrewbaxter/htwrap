@@ -91,7 +91,6 @@ impl UriJoin for Uri {
             new_path_and_query.extend(query.as_bytes());
         }
         parts.path_and_query = Some(PathAndQuery::try_from(new_path_and_query).unwrap());
-        eprintln!("parts c {:?}", parts);
         return Uri::from_parts(parts)
             .context_with("Failed to create URI from parts", ea!(own = self, other = other))
             .unwrap();
