@@ -593,7 +593,11 @@ pub async fn post_json<
     max_size: usize,
 ) -> Result<T, loga::Error> {
     let res = post(log, conn, url, headers, serde_json::to_vec(&body).unwrap(), max_size).await?;
-    return Ok(serde_json::from_slice(&res).context_with("Error deserializing response as json", ea!(url = url))?);
+    return Ok(
+        serde_json::from_slice(
+            &res,
+        ).context_with("Error deserializing response as json", ea!(url = url, body = String::from_utf8_lossy(&res)))?,
+    );
 }
 
 pub fn auth_token_headers(token: &str) -> HashMap<String, String> {
@@ -661,7 +665,11 @@ pub async fn get_json<
     max_size: usize,
 ) -> Result<T, loga::Error> {
     let res = get(log, conn, url, headers, max_size).await?;
-    return Ok(serde_json::from_slice(&res).context_with("Error deserializing response as json", ea!(url = url))?);
+    return Ok(
+        serde_json::from_slice(
+            &res,
+        ).context_with("Error deserializing response as json", ea!(url = url, body = String::from_utf8_lossy(&res)))?,
+    );
 }
 
 /// Make a `DELETE` request, return body as `Vec<u8>`.
