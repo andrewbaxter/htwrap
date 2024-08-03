@@ -147,7 +147,7 @@ pub async fn response_file(
     };
     let mut file = File::open(&local_path).await?;
     if let Some(ranges) = req_headers.get("Accept-Ranges") {
-        let Some(ranges_text) = ranges.to_str() ?.strip_prefix("bytes=") else {
+        let Some(ranges_text) = ranges.to_str()?.strip_prefix("bytes=") else {
             return Ok(response_400("Ranges missing bytes= prefix"));
         };
         let mut ranges = vec![];
@@ -410,8 +410,16 @@ pub async fn root_handle_http<
     OE: 'static + Send + Sync + std::error::Error,
     O: 'static + Send + http_body::Body<Data = OD, Error = OE>,
 >(log: &Log, handler: Arc<dyn Handler<O>>, stream: TcpStream) -> Result<(), loga::Error> {
-    let peer_addr = stream.peer_addr().context("Error getting connection peer address")?;
-    root_handle_http_inner(log, peer_addr, stream, handler);
+    match async {
+        let peer_addr = stream.peer_addr().context("Error getting connection peer address")?;
+        root_handle_http_inner(log, peer_addr, stream, handler);
+        return Ok(()) as Result<_, loga::Error>;
+    }.await {
+        Ok(_) => (),
+        Err(e) => {
+            log.log_err(loga::DEBUG, e.context("Error setting up connection"));
+        },
+    }
     return Ok(());
 }
 
@@ -433,12 +441,20 @@ pub async fn root_handle_https<
     handler: Arc<dyn Handler<O>>,
     stream: TcpStream,
 ) -> Result<(), loga::Error> {
-    let peer_addr = stream.peer_addr().context("Error getting connection peer address")?;
-    root_handle_http_inner(
-        log,
-        peer_addr,
-        tls_acceptor.accept(stream).await.context("Error establishing TLS connection")?,
-        handler,
-    );
+    match async {
+        let peer_addr = stream.peer_addr().context("Error getting connection peer address")?;
+        root_handle_http_inner(
+            log,
+            peer_addr,
+            tls_acceptor.accept(stream).await.context("Error establishing TLS connection")?,
+            handler,
+        );
+        return Ok(()) as Result<_, loga::Error>;
+    }.await {
+        Ok(_) => (),
+        Err(e) => {
+            log.log_err(loga::DEBUG, e.context("Error setting up connection"));
+        },
+    }
     return Ok(());
 }
