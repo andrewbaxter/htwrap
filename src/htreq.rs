@@ -1,5 +1,8 @@
 use {
-    crate::IpUrl,
+    crate::{
+        IpUrl,
+        HEADER_BEARER_PREFIX,
+    },
     chrono::Duration,
     futures::future::join_all,
     hickory_resolver::config::LookupIpStrategy,
@@ -602,7 +605,7 @@ pub async fn post_json<
 
 pub fn auth_token_headers(token: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
-    out.insert(AUTHORIZATION.to_string(), token.to_string());
+    out.insert(AUTHORIZATION.to_string(), format!("{}{}", HEADER_BEARER_PREFIX, token));
     return out;
 }
 

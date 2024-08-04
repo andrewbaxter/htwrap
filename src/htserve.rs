@@ -1,7 +1,6 @@
 use {
-    futures::{
-        TryStreamExt,
-    },
+    crate::HEADER_BEARER_PREFIX,
+    futures::TryStreamExt,
     http::{
         header::AUTHORIZATION,
         HeaderMap,
@@ -104,15 +103,14 @@ pub fn response_503_text(message: impl ToString) -> Response<Body> {
 pub struct AuthTokenHash(sha2::digest::Output<sha2::Sha256>);
 
 pub fn get_auth_token(headers: &HeaderMap) -> Result<String, loga::Error> {
-    const AUTH_PREFIX: &'static str = "Bearer ";
     return Ok(
         headers
             .get(http::header::AUTHORIZATION)
             .context(&format!("Missing {} header", AUTHORIZATION))?
             .to_str()
             .context("Couldn't turn authorization header into string")?
-            .strip_prefix(AUTH_PREFIX)
-            .context(&format!("Missing {} prefix", AUTH_PREFIX))?
+            .strip_prefix(HEADER_BEARER_PREFIX)
+            .context(&format!("Missing {} prefix", HEADER_BEARER_PREFIX))?
             .to_string(),
     );
 }

@@ -25,6 +25,8 @@ use {
 pub mod htreq;
 pub mod htserve;
 
+pub const HEADER_BEARER_PREFIX: &str = "Bearer ";
+
 pub fn new_abs_url(raw: impl AsRef<str>) -> Result<Uri, loga::Error> {
     let raw = raw.as_ref();
     let out = Uri::from_str(raw).context_with("Invalid URL", ea!(url = raw))?;
