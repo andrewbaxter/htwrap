@@ -448,31 +448,36 @@ pub async fn receive_stream<
     B: 'static + http_body::Body<Data = D, Error = E>,
 >(mut continue_send: ContinueSend<'a, B>, mut writer: impl Unpin + AsyncWrite) -> Result<(), loga::Error> {
     let (chan_tx, mut chan_rx) = channel(10);
-    let work_read = async {
-        loop {
-            let work = continue_send.body.frame();
-            let frame = match select!{
-                _ =& mut continue_send.conn_bg => {
-                    return Err(loga::err("Connection failed while reading body"));
-                }
-                r = work => r,
-            } {
-                Some(f) => {
-                    f
-                        .map_err(|e| loga::err_with("Error reading response", ea!(err = e)))?
-                        .into_data()
-                        .map_err(|e| loga::err_with("Received unexpected non-data frame", ea!(err = e.dbg_str())))?
-                        .to_vec()
-                },
-                None => {
-                    break;
-                },
-            };
-            chan_tx.send(frame).await.context("Error writing frame to channel for writer")?;
+    let work_read = {
+        let continue_send = &mut continue_send;
+        async move {
+            loop {
+                let work = continue_send.body.frame();
+                let frame = match select!{
+                    _ =& mut continue_send.conn_bg => {
+                        return Err(loga::err("Connection failed while reading body"));
+                    }
+                    r = work => r,
+                } {
+                    Some(f) => {
+                        f
+                            .map_err(|e| loga::err_with("Error reading response", ea!(err = e)))?
+                            .into_data()
+                            .map_err(
+                                |e| loga::err_with("Received unexpected non-data frame", ea!(err = e.dbg_str())),
+                            )?
+                            .to_vec()
+                    },
+                    None => {
+                        break;
+                    },
+                };
+                chan_tx.send(frame).await.context("Error writing frame to channel for writer")?;
+            }
+            return Ok(()) as Result<(), loga::Error>;
         }
-        return Ok(()) as Result<(), loga::Error>;
     };
-    let work_write = async {
+    let work_write = async move {
         while let Some(frame) = chan_rx.recv().await {
             writer.write_all(&frame).await.context("Error sending frame to writer")?;
         }
