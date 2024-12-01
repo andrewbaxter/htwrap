@@ -173,8 +173,13 @@ macro_rules! handler{
             struct Impl {
                 $($i: $it,) *
             };
-            #[$crate:: htserve:: async_trait:: async_trait] impl $crate:: htserve:: Handler < $o > for Impl {
-                async fn handle(&self, $r: $crate:: htserve:: HandlerArgs < '_ >) -> http:: response:: Response < $o > {
+            #[
+                $crate:: htserve:: handler:: async_trait:: async_trait
+            ] impl $crate:: htserve:: handler:: Handler < $o > for Impl {
+                async fn handle(
+                    &self,
+                    $r: $crate:: htserve:: handler:: HandlerArgs < '_ >
+                ) -> http:: response:: Response < $o > {
                     $(let $i =& self.$i;) * 
                     //. .
                     $b
