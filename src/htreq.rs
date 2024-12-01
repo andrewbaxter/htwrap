@@ -1,9 +1,8 @@
 use {
     crate::{
-        IpUrl,
-        HEADER_BEARER_PREFIX,
+        constants::HEADER_BEARER_PREFIX,
+        url::IpUrl,
     },
-    chrono::Duration,
     futures::future::join_all,
     hickory_resolver::config::LookupIpStrategy,
     http::header::AUTHORIZATION,
@@ -51,6 +50,7 @@ use {
         },
         str::FromStr,
         sync::OnceLock,
+        time::Duration,
     },
     tokio::{
         io::{
@@ -279,9 +279,7 @@ pub async fn connect_ips<
                         );
                     };
                     let res = select!{
-                        _ = sleep(
-                            Duration::try_seconds(10).unwrap().to_std().unwrap()
-                        ) => Err(loga::err("Timeout connecting")),
+                        _ = sleep(Duration::from_secs(10)) => Err(loga::err("Timeout connecting")),
                         res = connect => res,
                     };
                     match res {
@@ -411,7 +409,7 @@ pub async fn send<
         }));
     };
     let (status, headers, continue_send) = select!{
-        _ = sleep(max_time.to_std().unwrap()) => {
+        _ = sleep(max_time) => {
             return Err(loga::err("Timeout sending request and waiting for headers from server"));
         }
         x = read => x ?,
@@ -422,7 +420,7 @@ pub async fn send<
         ea!(method = method, url = url, status = status, headers = headers.dbg_str()),
     );
     if !status.is_success() {
-        match receive(continue_send, 10 * 1024, Duration::try_seconds(30).unwrap()).await {
+        match receive(continue_send, 10 * 1024, Duration::from_secs(30)).await {
             Ok(body) => {
                 return Err(
                     loga::err_with(
@@ -516,7 +514,7 @@ pub async fn receive<
         return Ok((body, continue_send.conn_send, continue_send.conn_bg));
     };
     let (body, conn_send, conn_bg) = select!{
-        _ = sleep(max_time.to_std().unwrap()) => {
+        _ = sleep(max_time) => {
             return Err(loga::err("Timeout waiting for response from server"));
         }
         x = read => x ?,
@@ -543,7 +541,7 @@ pub async fn send_simple<
             Result<(StatusCode, Vec<u8>), loga::Error>;
     };
     let (code, body) = select!{
-        _ = sleep(max_time.to_std().unwrap()) => {
+        _ = sleep(max_time) => {
             return Err(loga::err("Timeout waiting for response from server"));
         }
         x = work => x ?,
@@ -576,13 +574,7 @@ pub async fn post(
         ea!(method = "POST", url = url, headers = req.headers_ref().dbg_str(), body = String::from_utf8_lossy(&body)),
     );
     return Ok(
-        send_simple(
-            log,
-            conn,
-            max_size,
-            Duration::try_seconds(10).unwrap(),
-            req.body(Full::new(Bytes::from(body))).unwrap(),
-        )
+        send_simple(log, conn, max_size, Duration::from_secs(10), req.body(Full::new(Bytes::from(body))).unwrap())
             .await
             .context_with("Error sending POST", ea!(url = url))?,
     );
@@ -633,7 +625,7 @@ pub async fn get(
             log,
             conn,
             max_size,
-            Duration::try_seconds(10).unwrap(),
+            Duration::from_secs(10),
             req.body(Full::<Bytes>::new(Bytes::new())).unwrap(),
         )
             .await
@@ -699,7 +691,7 @@ pub async fn delete(
             log,
             conn,
             max_size,
-            Duration::try_seconds(10).unwrap(),
+            Duration::from_secs(10),
             req.body(Full::<Bytes>::new(Bytes::new())).unwrap(),
         )
             .await
