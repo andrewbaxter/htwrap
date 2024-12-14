@@ -193,8 +193,17 @@ macro_rules! handler{
     };
 }
 
-fn check_path_router_key(k: &str) -> bool {
-    return k == "" || (k.starts_with("/") && !k.ends_with("/"));
+fn check_path_router_key(k: &str) -> Result<(), String> {
+    if k == "" || (k.starts_with("/") && !k.ends_with("/")) {
+        return Ok(());
+    } else {
+        return Err(
+            format!(
+                "Router path [{}] doesn't match expected format: it must be an empty string, or else start with / and end with no /",
+                k
+            ),
+        );
+    }
 }
 
 /// A minimal path-based request router using the `Handler` trait.
@@ -207,15 +216,26 @@ impl<O> Default for PathRouter<O> {
 }
 
 impl<O> PathRouter<O> {
-    pub fn new(routes: BTreeMap<String, Box<dyn Handler<O>>>) -> Self {
-        assert!(routes.keys().all(|x| check_path_router_key(&x)));
-        return Self(routes);
+    pub fn new(routes: BTreeMap<String, Box<dyn Handler<O>>>) -> Result<Self, Vec<String>> {
+        let mut errors = vec![];
+        for key in routes.keys() {
+            if let Err(e) = check_path_router_key(&key) {
+                errors.push(e);
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        return Ok(Self(routes));
     }
 
-    pub fn insert(&mut self, key: impl AsRef<str>, handler: Box<dyn Handler<O>>) {
+    pub fn insert(&mut self, key: impl AsRef<str>, handler: Box<dyn Handler<O>>) -> Result<(), String> {
         let key = key.as_ref().to_string();
-        assert!(check_path_router_key(&key));
+        if let Err(e) = check_path_router_key(&key) {
+            return Err(e)
+        }
         self.0.insert(key, handler);
+        return Ok(());
     }
 }
 
