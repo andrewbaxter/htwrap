@@ -20,13 +20,15 @@ use {
         ResultContext,
     },
     rustls::{
-        pki_types::IpAddr,
         server::ResolvesServerCert,
         ServerConfig,
     },
     std::{
         collections::BTreeMap,
-        net::SocketAddr,
+        net::{
+            IpAddr,
+            SocketAddr,
+        },
         sync::Arc,
     },
     tokio::{
@@ -49,38 +51,18 @@ pub struct HandlerArgs<'a> {
     pub body: Incoming,
 }
 
-pub fn get_original_peer_ip(headers: &HeaderMap, direct_peer: IpAddr) -> IpAddr {
+pub fn get_original_peer_ip(headers: &mut HeaderMap, direct_peer: IpAddr) -> IpAddr {
     shed!{
-        let Some(f) = headers.get("x-forwarded-for") else {
+        let Ok(v) = crate::headers::parse_all_forwarded(headers) else {
             break;
         };
-        let Ok(f) = f.to_str() else {
+        let Some(v) = v.into_iter().next() else {
             break;
         };
-        let Ok(addr) = IpAddr::try_from(f.splitn(1, ",").next().unwrap()) else {
+        let Some((addr, _)) = v.for_ else {
             break;
         };
         return addr;
-    };
-    shed!{
-        let Some(f) = headers.get(FORWARDED) else {
-            break;
-        };
-        let Ok(f) = f.to_str() else {
-            break;
-        };
-        for part in f.split(";") {
-            let Some((k, v)) = part.split_once("=") else {
-                continue;
-            };
-            if k == "for" {
-                if let Ok(addr) = IpAddr::try_from(v) {
-                    return addr;
-                } else {
-                    break;
-                }
-            }
-        }
     };
     return direct_peer;
 }
