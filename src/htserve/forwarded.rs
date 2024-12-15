@@ -200,26 +200,26 @@ pub fn parse_forwarded<'a>(v: &'a HeaderValue) -> Result<Forwarded<'a>, loga::Er
     return Ok(out);
 }
 
-pub fn parse_all_forwarded<'a>(headers: &'a mut HeaderMap) -> Result<Forwarded<'a>, loga::Error> {
+pub fn parse_all_forwarded<'a>(headers: &'a HeaderMap) -> Result<Forwarded<'a>, loga::Error> {
     let mut separate_for = vec![];
     let mut separate_proto = vec![];
     let mut separate_host = vec![];
     let mut separate_path = vec![];
-    while let Some(v) = headers.remove(FORWARDED_FOR) {
+    for v in headers.get_all(FORWARDED_FOR) {
         separate_for.extend(parse_forwarded_for(&v)?);
     }
-    while let Some(v) = headers.remove(FORWARDED_PROTO) {
+    for v in headers.get_all(FORWARDED_PROTO) {
         separate_proto.push(v);
     }
-    while let Some(v) = headers.remove(FORWARDED_HOST) {
+    for v in headers.get_all(FORWARDED_HOST) {
         separate_host.push(v);
     }
-    while let Some(v) = headers.remove(FORWARDED_PATH) {
+    for v in headers.get_all(FORWARDED_PATH) {
         separate_path.push(v);
     }
-    if let Some(v) = headers.remove(http::header::FORWARDED) {
-        let mut out = parse_forwarded(&v)?.into_iter().map(|x| x.to_owned()).collect::<Vec<_>>();
-        while let Some(v) = headers.remove(http::header::FORWARDED) {
+    if headers.contains_key(http::header::FORWARDED) {
+        let mut out = vec![];
+        for v in headers.get_all(http::header::FORWARDED) {
             out.extend(parse_forwarded(&v)?.into_iter().map(|x| x.to_owned()));
         }
         return Ok(out);
@@ -259,7 +259,15 @@ pub fn parse_all_forwarded<'a>(headers: &'a mut HeaderMap) -> Result<Forwarded<'
     }
 }
 
-pub fn parse_forwarded_current<'a>(req_uri: &'a Uri, peer: SocketAddr) -> ForwardedHop<'a> {
+pub fn strip_all_forwarded(headers: &mut HeaderMap) {
+    while let Some(_) = headers.remove(FORWARDED_FOR) { }
+    while let Some(_) = headers.remove(FORWARDED_PROTO) { }
+    while let Some(_) = headers.remove(FORWARDED_HOST) { }
+    while let Some(_) = headers.remove(FORWARDED_PATH) { }
+    while let Some(_) = headers.remove(http::header::FORWARDED) { }
+}
+
+pub fn get_forwarded_current<'a>(req_uri: &'a Uri, peer: SocketAddr) -> ForwardedHop<'a> {
     let host;
     match req_uri.authority() {
         Some(authority) => {
@@ -277,7 +285,7 @@ pub fn parse_forwarded_current<'a>(req_uri: &'a Uri, peer: SocketAddr) -> Forwar
     };
 }
 
-pub fn add_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), loga::Error> {
+pub fn render_to_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), loga::Error> {
     let mut out = vec![];
     for (hop_i, hop) in f.iter().enumerate() {
         if hop_i > 0 {
@@ -354,7 +362,7 @@ pub fn add_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), loga::Error
     return Ok(());
 }
 
-pub fn add_x_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), loga::Error> {
+pub fn render_to_x_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), loga::Error> {
     let mut for_out = vec![];
     for hop in f {
         if let Some((addr, _)) = &hop.for_ {
