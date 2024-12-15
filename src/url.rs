@@ -58,6 +58,7 @@ impl IpUrl for Ipv6Addr {
 
 pub trait UriJoin {
     fn join(&self, other: impl AsRef<str>) -> Uri;
+    fn trim_suffix(&self, other: impl AsRef<str>) -> Option<Uri>;
 }
 
 impl UriJoin for Uri {
@@ -91,6 +92,22 @@ impl UriJoin for Uri {
         return Uri::from_parts(parts)
             .context_with("Failed to create URI from parts", ea!(own = self, other = other))
             .unwrap();
+    }
+
+    fn trim_suffix(&self, other: impl AsRef<str>) -> Option<Uri> {
+        let other = other.as_ref();
+        let mut parts = Parts::default();
+        parts.scheme = self.scheme().cloned();
+        parts.authority = self.authority().cloned();
+        let Some(new_path) = self.path().strip_suffix(other) else {
+            return None;
+        };
+        parts.path_and_query = Some(PathAndQuery::try_from(new_path).unwrap());
+        return Some(
+            Uri::from_parts(parts)
+                .context_with("Failed to create URI from parts", ea!(own = self, other = other))
+                .unwrap(),
+        );
     }
 }
 
@@ -136,5 +153,13 @@ mod test {
     #[test]
     fn test_uri_join_replace_query() {
         assert_eq!(new_abs_url("https://a.b/c?d").unwrap().join("x?y"), new_abs_url("https://a.b/c/x?y").unwrap());
+    }
+
+    #[test]
+    fn test_url_strip_suffix() {
+        assert_eq!(
+            new_abs_url("https://a.b/c/d").unwrap().trim_suffix("/d"),
+            Some(new_abs_url("https://a.b/c").unwrap())
+        );
     }
 }

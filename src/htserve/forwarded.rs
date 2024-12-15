@@ -1,13 +1,23 @@
 use {
+    crate::url::UriJoin,
+    flowcontrol::shed,
     format_bytes::format_bytes,
     http::{
         HeaderMap,
         HeaderValue,
         Uri,
     },
+    loga::{
+        ea,
+        DebugDisplay,
+        ResultContext,
+    },
     std::{
         borrow::Cow,
-        net::IpAddr,
+        net::{
+            IpAddr,
+            SocketAddr,
+        },
         str::FromStr,
     },
 };
@@ -34,64 +44,49 @@ impl<'a> ForwardedHop<'a> {
         };
     }
 
-    pub fn uri(&self) -> Result<Uri, String> {
-        let proto = self.proto.as_ref().ok_or_else(|| "Missing forwarded proto".to_string())?;
-        let host = self.host.as_ref().clone().ok_or_else(|| "Missing forwarded host".to_string())?;
+    pub fn uri(&self) -> Result<Uri, loga::Error> {
+        let proto = self.proto.as_ref().context("Missing forwarded proto")?;
+        let host = self.host.as_ref().clone().context("Missing forwarded host")?;
         let opt_path = Cow::Borrowed(b"" as &[u8]);
         let path = self.path.as_ref().unwrap_or_else(|| &opt_path);
         let uri_str =
             format!(
                 "{}://{}{}",
-                String::from_utf8(
-                    proto.to_vec(),
-                ).map_err(
-                    |e| format!("Forwarded proto is invalid UTF-8 [{}]: {}", String::from_utf8_lossy(&proto), e),
-                )?,
-                String::from_utf8(
-                    host.to_vec(),
-                ).map_err(
-                    |e| format!("Forwarded host is invalid UTF-8 [{}]: {}", String::from_utf8_lossy(&host), e),
-                )?,
-                String::from_utf8(
-                    path.to_vec(),
-                ).map_err(
-                    |e| format!("Forwarded path is invalid UTF-8 [{}]: {}", String::from_utf8_lossy(&path), e),
-                )?
+                String::from_utf8(proto.to_vec())
+                    .map_err(loga::err)
+                    .context_with("Forwarded proto is invalid UTF-8", ea!(proto = String::from_utf8_lossy(proto)))?,
+                String::from_utf8(host.to_vec())
+                    .map_err(loga::err)
+                    .context_with("Forwarded host is invalid UTF-8", ea!(host = String::from_utf8_lossy(host)))?,
+                String::from_utf8(path.to_vec())
+                    .map_err(loga::err)
+                    .context_with("Forwarded path is invalid UTF-8", ea!(path = String::from_utf8_lossy(path)))?
             );
         return Ok(
-            Uri::from_str(
-                &uri_str,
-            ).map_err(|e| format!("Assembled forwarding information [{}] produced invalid URI: {}", uri_str, e))?,
+            Uri::from_str(&uri_str).map_err(loga::err).context_with("Assembled URL is invalid", ea!(url = uri_str))?,
         );
     }
 }
 
 pub type Forwarded<'a> = Vec<ForwardedHop<'a>>;
 
-pub fn parse_forwarded_for(v: &HeaderValue) -> Result<Vec<(IpAddr, Option<u16>)>, String> {
+pub fn parse_forwarded_for(v: &HeaderValue) -> Result<Vec<(IpAddr, Option<u16>)>, loga::Error> {
     let v =
-        String::from_utf8(
-            v.as_bytes().to_vec(),
-        ).map_err(
-            |e| format!(
-                "Invalid UTF-8 in {} header [{}]: {}",
-                FORWARDED_FOR,
-                String::from_utf8_lossy(v.as_bytes()),
-                e
-            ),
-        )?;
+        String::from_utf8(v.as_bytes().to_vec())
+            .map_err(loga::err)
+            .context_with(format!("Invalid UTF-8 in {} header", FORWARDED_FOR), ea!(value = v.dbg_str()))?;
     let mut out = vec![];
     for addr in v.split(',') {
         let addr =
             IpAddr::from_str(
                 addr,
-            ).map_err(|e| format!("Failed to parse IP address in {} header [{}]: {}", FORWARDED_FOR, addr, e))?;
+            ).context_with(format!("Failed to parse IP address in {} header", FORWARDED_FOR), ea!(addr = addr))?;
         out.push((addr, None));
     }
     return Ok(out);
 }
 
-pub fn parse_forwarded<'a>(v: &'a HeaderValue) -> Result<Forwarded<'a>, String> {
+pub fn parse_forwarded<'a>(v: &'a HeaderValue) -> Result<Forwarded<'a>, loga::Error> {
     let mut out = vec![];
     for hop in v.as_bytes().split(|x| *x == b',') {
         let mut r#for = None;
@@ -102,7 +97,7 @@ pub fn parse_forwarded<'a>(v: &'a HeaderValue) -> Result<Forwarded<'a>, String> 
             let mut kv_splits = kv.splitn(2, |x| *x == b'=');
             let k = kv_splits.next().unwrap().to_ascii_lowercase();
             let Some(mut v) = kv_splits.next() else {
-                return Err(format!("Invalid forwarded kv pair: [{}]", String::from_utf8_lossy(kv)));
+                return Err(loga::err_with("Invalid forwarded kv pair", ea!(pair = String::from_utf8_lossy(kv))));
             };
             if let Some(v1) = v.strip_prefix(b"\"") {
                 if let Some(v1) = v1.strip_suffix(b"\"") {
@@ -113,26 +108,27 @@ pub fn parse_forwarded<'a>(v: &'a HeaderValue) -> Result<Forwarded<'a>, String> 
                 b"for" => {
                     if r#for.is_some() {
                         return Err(
-                            format!(
-                                "Invalid forwarded header hop, has repeated `for`: [{}]",
-                                String::from_utf8_lossy(hop)
+                            loga::err_with(
+                                "Invalid forwarded header hop, has repeated `for`",
+                                ea!(for_ = String::from_utf8_lossy(hop)),
                             ),
                         );
                     }
                     let v =
-                        String::from_utf8(
-                            v.to_vec(),
-                        ).map_err(
-                            |e| format!("Invalid utf-8 in forwarded `for` [{}]: {}", String::from_utf8_lossy(hop), e),
-                        )?;
+                        String::from_utf8(v.to_vec())
+                            .map_err(loga::err)
+                            .context_with(
+                                "Invalid utf-8 in forwarded `for`",
+                                ea!(hop = String::from_utf8_lossy(hop)),
+                            )?;
                     let ip_str;
                     let port_str;
                     if let Some(v) = v.strip_prefix("[") {
                         let Some(v) = v.strip_suffix("]") else {
                             return Err(
-                                format!(
-                                    "Invalid forwarded header hop IPv6 `for` brackets: [{}]",
-                                    String::from_utf8_lossy(hop)
+                                loga::err_with(
+                                    "Invalid forwarded header hop IPv6 `for` brackets",
+                                    ea!(hop = String::from_utf8_lossy(hop)),
                                 ),
                             );
                         };
@@ -147,12 +143,12 @@ pub fn parse_forwarded<'a>(v: &'a HeaderValue) -> Result<Forwarded<'a>, String> 
                     let ip =
                         IpAddr::from_str(
                             ip_str,
-                        ).map_err(|e| format!("Invalid IP addr in forwarded `for` [{}]: {}", v, e))?;
+                        ).context_with("Invalid IP addr in forwarded `for`", ea!(value = v))?;
                     if let Some(port_str) = port_str {
                         let port =
                             u16::from_str(
                                 port_str,
-                            ).map_err(|e| format!("Invalid port in forwarded `for` [{}]: {}", v, e))?;
+                            ).context_with("Invalid port in forwarded `for`", ea!(value = v))?;
                         r#for = Some((ip, Some(port)));
                     } else {
                         r#for = Some((ip, None));
@@ -161,9 +157,9 @@ pub fn parse_forwarded<'a>(v: &'a HeaderValue) -> Result<Forwarded<'a>, String> 
                 b"proto" => {
                     if proto.is_some() {
                         return Err(
-                            format!(
-                                "Invalid forwarded header hop, has repeated `proto`: [{}]",
-                                String::from_utf8_lossy(hop)
+                            loga::err_with(
+                                "Invalid forwarded header hop, has repeated `proto`",
+                                ea!(hop = String::from_utf8_lossy(&hop)),
                             ),
                         );
                     }
@@ -172,9 +168,9 @@ pub fn parse_forwarded<'a>(v: &'a HeaderValue) -> Result<Forwarded<'a>, String> 
                 b"host" => {
                     if host.is_some() {
                         return Err(
-                            format!(
-                                "Invalid forwarded header hop, has repeated `host`: [{}]",
-                                String::from_utf8_lossy(hop)
+                            loga::err_with(
+                                "Invalid forwarded header hop, has repeated `host`",
+                                ea!(hop = String::from_utf8_lossy(hop)),
                             ),
                         );
                     }
@@ -183,9 +179,9 @@ pub fn parse_forwarded<'a>(v: &'a HeaderValue) -> Result<Forwarded<'a>, String> 
                 b"path" => {
                     if path.is_some() {
                         return Err(
-                            format!(
-                                "Invalid forwarded header hop, has repeated `path`: [{}]",
-                                String::from_utf8_lossy(hop)
+                            loga::err_with(
+                                "Invalid forwarded header hop, has repeated `path`",
+                                ea!(hop = String::from_utf8_lossy(hop)),
                             ),
                         );
                     }
@@ -204,7 +200,7 @@ pub fn parse_forwarded<'a>(v: &'a HeaderValue) -> Result<Forwarded<'a>, String> 
     return Ok(out);
 }
 
-pub fn parse_all_forwarded<'a>(headers: &'a mut HeaderMap) -> Result<Forwarded<'a>, String> {
+pub fn parse_all_forwarded<'a>(headers: &'a mut HeaderMap) -> Result<Forwarded<'a>, loga::Error> {
     let mut separate_for = vec![];
     let mut separate_proto = vec![];
     let mut separate_host = vec![];
@@ -244,7 +240,7 @@ pub fn parse_all_forwarded<'a>(headers: &'a mut HeaderMap) -> Result<Forwarded<'
             (!separate_proto.is_empty() && separate_proto.len() != want_len) ||
             (!separate_host.is_empty() && separate_host.len() != want_len) ||
             (!separate_path.is_empty() && separate_path.len() != want_len) {
-            return Err(format!("Mismatched x-forwarded header value counts"));
+            return Err(loga::err("Mismatched x-forwarded header value counts"));
         }
         separate_for.reverse();
         separate_proto.reverse();
@@ -263,7 +259,25 @@ pub fn parse_all_forwarded<'a>(headers: &'a mut HeaderMap) -> Result<Forwarded<'
     }
 }
 
-pub fn add_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), String> {
+pub fn parse_forwarded_current<'a>(req_uri: &'a Uri, peer: SocketAddr) -> ForwardedHop<'a> {
+    let host;
+    match req_uri.authority() {
+        Some(authority) => {
+            host = authority.as_str().rsplit("@").next();
+        },
+        None => {
+            host = None;
+        },
+    }
+    return ForwardedHop {
+        for_: Some((peer.ip(), Some(peer.port()))),
+        proto: req_uri.scheme_str().map(|x| Cow::Borrowed(x.as_bytes())),
+        host: host.map(|x| Cow::Borrowed(x.as_bytes())),
+        path: Some(Cow::Borrowed(req_uri.path().as_bytes())),
+    };
+}
+
+pub fn add_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), loga::Error> {
     let mut out = vec![];
     for (hop_i, hop) in f.iter().enumerate() {
         if hop_i > 0 {
@@ -332,18 +346,15 @@ pub fn add_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), String> {
         http::header::FORWARDED,
         HeaderValue::from_bytes(
             &out_bytes,
-        ).map_err(
-            |e| format!(
-                "Forwarded header values produced invalid header [{}]: {}",
-                String::from_utf8_lossy(&out_bytes),
-                e
-            ),
+        ).context_with(
+            "Forwarded header values produced invalid header",
+            ea!(header = String::from_utf8_lossy(&out_bytes)),
         )?,
     );
     return Ok(());
 }
 
-pub fn add_x_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), String> {
+pub fn add_x_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), loga::Error> {
     let mut for_out = vec![];
     for hop in f {
         if let Some((addr, _)) = &hop.for_ {
@@ -354,12 +365,9 @@ pub fn add_x_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), String> {
                 FORWARDED_PROTO,
                 HeaderValue::from_bytes(
                     &proto,
-                ).map_err(
-                    |e| format!(
-                        "Forwarded proto [{}] is invalid as header value: {}",
-                        String::from_utf8_lossy(&proto),
-                        e
-                    ),
+                ).context_with(
+                    "Forwarded proto is invalid as header value",
+                    ea!(proto = String::from_utf8_lossy(&proto)),
                 )?,
             );
         }
@@ -368,12 +376,9 @@ pub fn add_x_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), String> {
                 FORWARDED_HOST,
                 HeaderValue::from_bytes(
                     &host,
-                ).map_err(
-                    |e| format!(
-                        "Forwarded host [{}] is invalid as header value: {}",
-                        String::from_utf8_lossy(&host),
-                        e
-                    ),
+                ).context_with(
+                    "Forwarded host is invalid as header value",
+                    ea!(host = String::from_utf8_lossy(&host)),
                 )?,
             );
         }
@@ -382,12 +387,9 @@ pub fn add_x_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), String> {
                 FORWARDED_PATH,
                 HeaderValue::from_bytes(
                     &path,
-                ).map_err(
-                    |e| format!(
-                        "Forwarded path [{}] is invalid as header value: {}",
-                        String::from_utf8_lossy(&path),
-                        e
-                    ),
+                ).context_with(
+                    "Forwarded path is invalid as header value",
+                    ea!(path = String::from_utf8_lossy(&path)),
                 )?,
             );
         }
@@ -398,8 +400,33 @@ pub fn add_x_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), String> {
             FORWARDED_FOR,
             HeaderValue::from_str(
                 &joined,
-            ).map_err(|e| format!("Forwarded for [{}] is invalid as header value: {}", joined, e))?,
+            ).context_with("Forwarded for is invalid as header value", ea!(for_ = joined))?,
         );
     }
     return Ok(());
+}
+
+pub fn get_original_peer_ip(forwarded: &Forwarded, current_peer: IpAddr) -> IpAddr {
+    shed!{
+        let Some(v) = forwarded.iter().next() else {
+            break;
+        };
+        let Some((addr, _)) = v.for_ else {
+            break;
+        };
+        return addr;
+    };
+    return current_peer;
+}
+
+pub fn get_original_base_url(forwarded: &Forwarded, current_subpath: &str) -> Result<Uri, loga::Error> {
+    let url = forwarded[0].uri()?;
+    return Ok(
+        url
+            .trim_suffix(current_subpath)
+            .context_with(
+                "Current subpath isn't a suffix of the original request path; complex rewrites are not supported",
+                ea!(original = url),
+            )?,
+    );
 }

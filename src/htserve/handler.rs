@@ -26,7 +26,6 @@ use {
     std::{
         collections::BTreeMap,
         net::{
-            IpAddr,
             SocketAddr,
         },
         sync::Arc,
@@ -49,22 +48,6 @@ pub struct HandlerArgs<'a> {
     pub query: &'a str,
     pub head: &'a http::request::Parts,
     pub body: Incoming,
-}
-
-pub fn get_original_peer_ip(headers: &mut HeaderMap, direct_peer: IpAddr) -> IpAddr {
-    shed!{
-        let Ok(v) = crate::headers::parse_all_forwarded(headers) else {
-            break;
-        };
-        let Some(v) = v.into_iter().next() else {
-            break;
-        };
-        let Some((addr, _)) = v.for_ else {
-            break;
-        };
-        return addr;
-    };
-    return direct_peer;
 }
 
 /// Try to reconstruct the original url from the `x-forwarded-host` `-proto`
