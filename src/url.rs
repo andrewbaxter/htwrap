@@ -16,8 +16,6 @@ use {
             Ipv4Addr,
             Ipv6Addr,
         },
-        os::unix::ffi::OsStringExt,
-        path::PathBuf,
         str::FromStr,
     },
 };
@@ -71,20 +69,49 @@ impl UriJoin for Uri {
         }
 
         // Relative
-        let path;
-        let query;
+        let other_path;
+        let other_query;
         if let Some((path1, query1)) = other.split_once("?") {
-            path = path1;
-            query = Some(query1);
+            other_path = path1;
+            other_query = Some(query1);
         } else {
-            path = other;
-            query = None;
+            other_path = other;
+            other_query = None;
         }
+        let other_abs;
+        let other_path = if let Some(p) = other_path.strip_prefix("/") {
+            other_abs = true;
+            p
+        } else {
+            other_abs = false;
+            other_path
+        };
         let mut parts = Parts::default();
         parts.scheme = self.scheme().cloned();
         parts.authority = self.authority().cloned();
-        let mut new_path_and_query = PathBuf::from(self.path()).join(path).into_os_string().into_vec();
-        if let Some(query) = query {
+        let mut path;
+        if other_abs {
+            path = vec![""];
+        } else if self.path() == "" {
+            path = vec![""];
+        } else if self.path() == "/" {
+            path = vec![""];
+        } else {
+            path = self.path().split("/").collect::<Vec<_>>();
+        }
+        for part in other_path.split("/") {
+            match part {
+                "." => { },
+                ".." => {
+                    path.pop();
+                },
+                seg => {
+                    path.push(seg);
+                },
+            }
+        }
+        let mut new_path_and_query = path.join("/").into_bytes();
+        if let Some(query) = other_query {
             new_path_and_query.extend(b"?");
             new_path_and_query.extend(query.as_bytes());
         }
