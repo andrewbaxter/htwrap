@@ -3,8 +3,20 @@ use {
         constants::HEADER_BEARER_PREFIX,
         url::IpUrl,
     },
+    flowcontrol::shed,
     futures::future::join_all,
-    hickory_resolver::config::LookupIpStrategy,
+    hickory_resolver::{
+        config::LookupIpStrategy,
+        proto::{
+            op::Query,
+            rr::{
+                RData,
+                RecordType,
+            },
+        },
+        Hosts,
+        Name,
+    },
     http::header::AUTHORIZATION,
     http_body_util::{
         BodyExt,
@@ -49,7 +61,9 @@ use {
             Ipv6Addr,
         },
         str::FromStr,
-        sync::OnceLock,
+        sync::{
+            LazyLock,
+        },
         time::Duration,
     },
     tokio::{
@@ -71,14 +85,15 @@ use {
 /// Get a once-initialized rustls native roots client config, avoiding scanning the
 /// filesystem multiple times.
 pub fn default_tls() -> rustls::ClientConfig {
-    static S: OnceLock<rustls::ClientConfig> = OnceLock::new();
-    return S.get_or_init(move || {
-        ClientConfig::builder()
-            .with_native_roots()
-            .context("Error loading native roots")
-            .unwrap()
-            .with_no_client_auth()
-    }).clone();
+    static S: LazyLock<rustls::ClientConfig> =
+        LazyLock::new(
+            || ClientConfig::builder()
+                .with_native_roots()
+                .context("Error loading native roots")
+                .unwrap()
+                .with_no_client_auth(),
+        );
+    return S.clone();
 }
 
 /// This is a light wrapper around a connection to allow mut-ref access rather than
@@ -207,24 +222,58 @@ pub async fn resolve(host: &Host) -> Result<Ips, loga::Error> {
             };
         },
         Host::Name(host) => {
-            let (hickory_config, mut hickory_options) =
-                hickory_resolver
-                ::system_conf
-                ::read_system_conf().context("Error reading system dns resolver config for http request")?;
-            hickory_options.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
-            for ip in hickory_resolver::TokioAsyncResolver::tokio(hickory_config, hickory_options)
-                .lookup_ip(&format!("{}.", host))
-                .await
-                .context("Failed to look up lookup host ip addresses")? {
-                match ip {
-                    std::net::IpAddr::V4(ip) => {
-                        ipv4s.push(ip);
-                    },
-                    std::net::IpAddr::V6(ip) => {
-                        ipv6s.push(ip);
-                    },
+            let host = format!("{}.", host);
+            static HOSTS: LazyLock<Hosts> = LazyLock::new(|| Hosts::new());
+            shed!{
+                'found_hosts _;
+                // Check /etc/hosts
+                shed!{
+                    let Ok(name) = Name::from_utf8(&host) else {
+                        break;
+                    };
+                    let mut found_etc_hosts = false;
+                    if let Some(res) = HOSTS.lookup_static_host(&Query::query(name.clone(), RecordType::A)) {
+                        for rec in res {
+                            let RData::A(rec) = rec else {
+                                continue;
+                            };
+                            ipv4s.push(rec.0);
+                            found_etc_hosts = true;
+                        }
+                    };
+                    if let Some(res) = HOSTS.lookup_static_host(&Query::query(name.clone(), RecordType::AAAA)) {
+                        for rec in res {
+                            let RData::AAAA(rec) = rec else {
+                                continue;
+                            };
+                            ipv6s.push(rec.0);
+                            found_etc_hosts = true;
+                        }
+                    };
+                    if found_etc_hosts {
+                        break 'found_hosts;
+                    }
                 }
-            };
+                // Do actual internet search
+                let (hickory_config, mut hickory_options) =
+                    hickory_resolver
+                    ::system_conf
+                    ::read_system_conf().context("Error reading system dns resolver config for http request")?;
+                hickory_options.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
+                for ip in hickory_resolver::TokioAsyncResolver::tokio(hickory_config, hickory_options)
+                    .lookup_ip(&host)
+                    .await
+                    .context("Failed to look up lookup host ip addresses")? {
+                    match ip {
+                        std::net::IpAddr::V4(ip) => {
+                            ipv4s.push(ip);
+                        },
+                        std::net::IpAddr::V6(ip) => {
+                            ipv6s.push(ip);
+                        },
+                    }
+                };
+            }
         },
     };
     {
