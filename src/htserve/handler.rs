@@ -1,11 +1,7 @@
 use {
-    flowcontrol::shed,
     http::{
-        header::FORWARDED,
-        HeaderMap,
         Response,
         StatusCode,
-        Uri,
     },
     hyper::{
         body::Incoming,
@@ -48,77 +44,6 @@ pub struct HandlerArgs<'a> {
     pub query: &'a str,
     pub head: &'a http::request::Parts,
     pub body: Incoming,
-}
-
-/// Try to reconstruct the original url from the `x-forwarded-host` `-proto`
-/// `-prefix` and/or `forwarded: prefix=` headers.
-pub fn get_original_base_url(headers: &HeaderMap) -> Option<Uri> {
-    let mut proto = None;
-    let mut host = None;
-    let mut prefix = None;
-    shed!{
-        let Some(f) = headers.get("x-forwarded-proto") else {
-            break;
-        };
-        let Ok(f) = f.to_str() else {
-            break;
-        };
-        proto = Some(f);
-    };
-    shed!{
-        let Some(f) = headers.get("x-forwarded-host") else {
-            break;
-        };
-        let Ok(f) = f.to_str() else {
-            break;
-        };
-        host = Some(f);
-    };
-    shed!{
-        let Some(f) = headers.get("x-forwarded-prefix") else {
-            break;
-        };
-        let Ok(f) = f.to_str() else {
-            break;
-        };
-        prefix = Some(f);
-    };
-    shed!{
-        let Some(f) = headers.get(FORWARDED) else {
-            break;
-        };
-        let Ok(f) = f.to_str() else {
-            break;
-        };
-        for part in f.split(";") {
-            let Some((k, v)) = part.split_once("=") else {
-                continue;
-            };
-            match k {
-                "host" => {
-                    host = Some(v);
-                },
-                "proto" => {
-                    proto = Some(v);
-                },
-                "prefix" => {
-                    prefix = Some(v);
-                },
-                _ => { },
-            }
-        }
-    };
-    let Some(proto) = proto else {
-        return None;
-    };
-    let Some(host) = host else {
-        return None;
-    };
-    let prefix = prefix.unwrap_or("");
-    let Ok(out) = Uri::try_from(format!("{}://{}{}", proto, host, prefix)) else {
-        return None;
-    };
-    return Some(out);
 }
 
 /// A generic http request handler trait to ease composition.

@@ -1,5 +1,4 @@
 use {
-    crate::url::UriJoin,
     flowcontrol::shed,
     format_bytes::format_bytes,
     http::{
@@ -416,6 +415,7 @@ pub fn render_to_x_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), log
     return Ok(());
 }
 
+/// This gets the IP of the client that initially sent the request
 pub fn get_original_peer_ip(forwarded: &Forwarded, current_peer: IpAddr) -> IpAddr {
     shed!{
         let Some(v) = forwarded.iter().next() else {
@@ -429,14 +429,10 @@ pub fn get_original_peer_ip(forwarded: &Forwarded, current_peer: IpAddr) -> IpAd
     return current_peer;
 }
 
-pub fn get_original_base_url(forwarded: &Forwarded, current_subpath: &str) -> Result<Uri, loga::Error> {
+/// Get the url the client initially sent the request to, before rewrites due to
+/// forwarding. This uses the first hop from `Forwarded` or the `X-Forwarded`
+/// headers.
+pub fn get_original_base_url(forwarded: &Forwarded) -> Result<Uri, loga::Error> {
     let url = forwarded[0].uri()?;
-    return Ok(
-        url
-            .trim_suffix(current_subpath)
-            .context_with(
-                "Current subpath isn't a suffix of the original request path; complex rewrites are not supported",
-                ea!(original = url),
-            )?,
-    );
+    return Ok(url);
 }
