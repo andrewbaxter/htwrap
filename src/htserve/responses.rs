@@ -121,6 +121,9 @@ pub async fn response_file(
             }
         },
     };
+    if !meta1.is_file() {
+        return Ok(response_404());
+    }
     let mut file = File::open(&local_path).await?;
     if let Some(ranges) = req_headers.get("Accept-Ranges") {
         let Some(ranges_text) = ranges.to_str()?.strip_prefix("bytes=") else {
