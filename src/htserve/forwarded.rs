@@ -331,7 +331,7 @@ pub fn render_to_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), loga:
             if kv_i > 0 {
                 out_hop.extend(b"; ");
             }
-            out_hop.extend(b"host={}");
+            out_hop.extend(b"host=");
             out_hop.extend(format_bytes!(b"{}", host));
             #[allow(unused_assignments)]
             {
