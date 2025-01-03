@@ -288,25 +288,26 @@ pub fn get_forwarded_current<'a>(req_uri: &'a Uri, peer: SocketAddr) -> Forwarde
 pub fn render_to_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), loga::Error> {
     let mut out = vec![];
     for (hop_i, hop) in f.iter().enumerate() {
+        let mut out_hop = vec![];
         if hop_i > 0 {
-            out.extend(b"; ");
+            out_hop.extend(b"; ");
         }
         let mut kv_i = 0;
         if let Some((addr, port)) = &hop.for_ {
-            out.extend(b"for=");
+            out_hop.extend(b"for=");
             match addr {
                 IpAddr::V4(addr) => {
                     if let Some(port) = port {
-                        out.extend(format_bytes!(b"{}:{}", addr.to_string().into_bytes(), *port));
+                        out_hop.extend(format_bytes!(b"{}:{}", addr.to_string().into_bytes(), *port));
                     } else {
-                        out.extend(format_bytes!(b"{}", addr.to_string().into_bytes()));
+                        out_hop.extend(format_bytes!(b"{}", addr.to_string().into_bytes()));
                     }
                 },
                 IpAddr::V6(addr) => {
                     if let Some(port) = port {
-                        out.extend(format_bytes!(b"\"[{}]:{}\"", addr.to_string().into_bytes(), *port));
+                        out_hop.extend(format_bytes!(b"\"[{}]:{}\"", addr.to_string().into_bytes(), *port));
                     } else {
-                        out.extend(format_bytes!(b"\"[{}]\"", addr.to_string().into_bytes()));
+                        out_hop.extend(format_bytes!(b"\"[{}]\"", addr.to_string().into_bytes()));
                     }
                 },
             }
@@ -317,10 +318,10 @@ pub fn render_to_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), loga:
         }
         if let Some(proto) = &hop.proto {
             if kv_i > 0 {
-                out.extend(b"; ");
+                out_hop.extend(b"; ");
             }
-            out.extend(b"proto=");
-            out.extend(format_bytes!(b"{}", proto));
+            out_hop.extend(b"proto=");
+            out_hop.extend(format_bytes!(b"{}", proto));
             #[allow(unused_assignments)]
             {
                 kv_i += 1;
@@ -328,10 +329,10 @@ pub fn render_to_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), loga:
         }
         if let Some(host) = &hop.host {
             if kv_i > 0 {
-                out.extend(b"; ");
+                out_hop.extend(b"; ");
             }
-            out.extend(b"host={}");
-            out.extend(format_bytes!(b"{}", host));
+            out_hop.extend(b"host={}");
+            out_hop.extend(format_bytes!(b"{}", host));
             #[allow(unused_assignments)]
             {
                 kv_i += 1;
@@ -339,15 +340,16 @@ pub fn render_to_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), loga:
         }
         if let Some(path) = &hop.path {
             if kv_i > 0 {
-                out.extend(b"; ");
+                out_hop.extend(b"; ");
             }
-            out.extend(b"path=");
-            out.extend(format_bytes!(b"{}", path));
+            out_hop.extend(b"path=");
+            out_hop.extend(format_bytes!(b"{}", path));
             #[allow(unused_assignments)]
             {
                 kv_i += 1;
             }
         }
+        out.push(out_hop);
     }
     let out_bytes = format_bytes!(b"{}", format_bytes::join(out, b", "));
     m.insert(
