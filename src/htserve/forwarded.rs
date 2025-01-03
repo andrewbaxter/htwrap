@@ -26,6 +26,7 @@ pub const FORWARDED_PROTO: &str = "X-Forwarded-Proto";
 pub const FORWARDED_HOST: &str = "X-Forwarded-Host";
 pub const FORWARDED_PATH: &str = "X-Forwarded-Path";
 
+#[derive(PartialEq, Eq, Debug)]
 pub struct ForwardedHop<'a> {
     pub for_: Option<(IpAddr, Option<u16>)>,
     pub proto: Option<Cow<'a, [u8]>>,
@@ -93,6 +94,7 @@ pub fn parse_forwarded<'a>(v: &'a HeaderValue) -> Result<Forwarded<'a>, loga::Er
         let mut host = None;
         let mut path = None;
         for kv in hop.split(|x| *x == b';') {
+            let kv = kv.trim_ascii();
             let mut kv_splits = kv.splitn(2, |x| *x == b'=');
             let k = kv_splits.next().unwrap().to_ascii_lowercase();
             let Some(mut v) = kv_splits.next() else {
@@ -123,17 +125,31 @@ pub fn parse_forwarded<'a>(v: &'a HeaderValue) -> Result<Forwarded<'a>, loga::Er
                     let ip_str;
                     let port_str;
                     if let Some(v) = v.strip_prefix("[") {
-                        let Some(v) = v.strip_suffix("]") else {
-                            return Err(
-                                loga::err_with(
-                                    "Invalid forwarded header hop IPv6 `for` brackets",
-                                    ea!(hop = String::from_utf8_lossy(hop)),
-                                ),
-                            );
-                        };
-                        let mut parts = v.splitn(2, ':');
-                        ip_str = parts.next().unwrap();
-                        port_str = parts.next();
+                        if let Some(v) = v.strip_suffix("]") {
+                            ip_str = v;
+                            port_str = None;
+                        } else {
+                            let mut parts = v.rsplitn(2, ':');
+                            let part1 = parts.next().unwrap();
+                            let part2 = parts.next();
+                            let raw_ip_part;
+                            if let Some(v) = part2 {
+                                raw_ip_part = v;
+                                port_str = Some(part1);
+                            } else {
+                                raw_ip_part = part1;
+                                port_str = None;
+                            }
+                            let Some(v) = raw_ip_part.strip_suffix("]") else {
+                                return Err(
+                                    loga::err_with(
+                                        "Invalid forwarded header hop `for` IPv6 brackets",
+                                        ea!(hop = String::from_utf8_lossy(hop)),
+                                    ),
+                                );
+                            };
+                            ip_str = v;
+                        }
                     } else {
                         let mut parts = v.splitn(2, ':');
                         ip_str = parts.next().unwrap();
@@ -433,6 +449,6 @@ pub fn get_original_peer_ip(forwarded: &Forwarded, current_peer: IpAddr) -> IpAd
 /// forwarding. This uses the first hop from `Forwarded` or the `X-Forwarded`
 /// headers.
 pub fn get_original_base_url(forwarded: &Forwarded) -> Result<Uri, loga::Error> {
-    let url = forwarded[0].uri()?;
+    let url = forwarded.first().context("No forwarding information in headers")?.uri()?;
     return Ok(url);
 }
