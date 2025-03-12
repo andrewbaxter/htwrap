@@ -1,4 +1,7 @@
 use {
+    flowcontrol::{
+        superif,
+    },
     http::{
         Response,
         StatusCode,
@@ -21,9 +24,8 @@ use {
     },
     std::{
         collections::BTreeMap,
-        net::{
-            SocketAddr,
-        },
+        error::Error,
+        net::SocketAddr,
         sync::Arc,
     },
     tokio::{
@@ -157,7 +159,7 @@ pub fn root_handle_http_inner<
     let log = log.clone();
     tokio::task::spawn(async move {
         match async {
-            hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+            match hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
                 .serve_connection(TokioIo::new(stream), service_fn({
                     move |req| {
                         let handler = handler.clone();
@@ -185,8 +187,32 @@ pub fn root_handle_http_inner<
                         }
                     }
                 }))
-                .await
-                .map_err(|e| loga::err(format!("Error serving connection: {:?}", e)))?;
+                .await {
+                Ok(_) => { },
+                Err(e) => superif!({
+                    // Please, hyper, just because you've erased the type doesn't mean you've
+                    // magically avoided breaking changes
+                    let Some(e) = e.downcast_ref::<hyper::Error>() else {
+                        break 'bad;
+                    };
+                    let Some(e) = e.source() else {
+                        break 'bad;
+                    };
+                    let Some(e) = e.downcast_ref::<std::io::Error>() else {
+                        break 'bad;
+                    };
+                    match e.kind() {
+                        std::io::ErrorKind::NotConnected => {
+                            // nop
+                        },
+                        _ => {
+                            break 'bad;
+                        },
+                    }
+                } 'bad {
+                    return Err(loga::err(format!("Error serving connection: {:?}", e)));
+                }),
+            };
             return Ok(()) as Result<(), loga::Error>;
         }.await {
             Ok(_) => (),
