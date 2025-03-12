@@ -186,7 +186,7 @@ pub fn root_handle_http_inner<
                     }
                 }))
                 .await
-                .map_err(|_| loga::err("Unknown error serving connection"))?;
+                .map_err(|e| loga::err(format!("Error serving connection: {:?}", e)))?;
             return Ok(()) as Result<(), loga::Error>;
         }.await {
             Ok(_) => (),
