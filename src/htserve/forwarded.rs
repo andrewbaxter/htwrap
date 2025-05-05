@@ -458,7 +458,9 @@ pub fn get_original_peer_ip(forwarded: &Forwarded, current_peer: IpAddr) -> IpAd
 pub fn get_original_base_url(direct: &Uri, forwarded: &Forwarded) -> Result<Uri, loga::Error> {
     let out = shed!{
         let Some(first) = forwarded.first() else {
-            break direct.clone();
+            let mut parts = direct.clone().into_parts();
+            parts.path_and_query = None;
+            break Uri::from_parts(parts).unwrap();
         };
         let url = first.uri()?;
         break url;
