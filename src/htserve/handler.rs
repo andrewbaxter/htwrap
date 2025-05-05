@@ -1,9 +1,12 @@
 use {
-    flowcontrol::superif,
+    flowcontrol::{
+        superif,
+    },
     http::{
         header::HOST,
         uri::{
             Authority,
+            Scheme,
         },
         Response,
         StatusCode,
@@ -160,7 +163,7 @@ pub fn root_handle_http_inner<
     OD: 'static + Send,
     OE: 'static + Send + Sync + std::error::Error,
     O: 'static + Send + http_body::Body<Data = OD, Error = OE>,
->(log: &Log, peer_addr: SocketAddr, stream: I, handler: Arc<dyn Handler<O>>) {
+>(log: &Log, https: bool, peer_addr: SocketAddr, stream: I, handler: Arc<dyn Handler<O>>) {
     let log = log.clone();
     tokio::task::spawn(async move {
         match async {
@@ -172,28 +175,36 @@ pub fn root_handle_http_inner<
                             let (head, body) = req.into_parts();
                             let url;
 
-                            // Firefox does method line without abs url, need to supplement from `HOST` header
-                            if head.uri.host().unwrap_or_default() == "" {
-                                if let Some(host) = head.headers.get(HOST) {
-                                    let mut parts = head.uri.clone().into_parts();
-                                    parts.authority =
-                                        Some(
-                                            Authority::try_from(
-                                                host.as_bytes(),
-                                            ).map_err(
-                                                |e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
-                                            )?,
-                                        );
-                                    url =
-                                        Uri::from_parts(
-                                            parts,
-                                        ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                            // Fix up missing url parts...
+                            let mut parts = head.uri.clone().into_parts();
+                            if parts.scheme.is_none() {
+                                parts.scheme = Some(if https {
+                                    Scheme::HTTPS
                                 } else {
-                                    url = head.uri.clone();
-                                }
-                            } else {
-                                url = head.uri.clone();
+                                    Scheme::HTTP
+                                });
                             }
+                            let mut authority: Vec<u8> = vec![];
+                            if let Some(host1) = head.headers.get(HOST) {
+                                authority.extend(host1.as_bytes());
+                            } else if let Some(a) = &parts.authority {
+                                authority.extend(a.host().as_bytes());
+                            }
+                            if let Some(a) = parts.authority {
+                                if let Some(port) = a.port_u16() {
+                                    authority.extend(port.to_string().as_bytes());
+                                }
+                            }
+                            parts.authority =
+                                Some(
+                                    Authority::try_from(
+                                        authority.as_slice(),
+                                    ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?,
+                                );
+                            url =
+                                Uri::from_parts(
+                                    parts,
+                                ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
                             // Grab and normalize path/query
                             let path;
@@ -264,7 +275,7 @@ pub async fn root_handle_http<
 >(log: &Log, handler: Arc<dyn Handler<O>>, stream: TcpStream) -> Result<(), loga::Error> {
     match async {
         let peer_addr = stream.peer_addr().context("Error getting connection peer address")?;
-        root_handle_http_inner(log, peer_addr, stream, handler);
+        root_handle_http_inner(log, false, peer_addr, stream, handler);
         return Ok(()) as Result<_, loga::Error>;
     }.await {
         Ok(_) => (),
@@ -297,6 +308,7 @@ pub async fn root_handle_https<
         let peer_addr = stream.peer_addr().context("Error getting connection peer address")?;
         root_handle_http_inner(
             log,
+            true,
             peer_addr,
             tls_acceptor.accept(stream).await.context("Error establishing TLS connection")?,
             handler,
