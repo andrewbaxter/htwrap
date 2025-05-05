@@ -62,7 +62,7 @@ pub fn response_200_html(body: Vec<u8>) -> Response<Body> {
 }
 
 pub fn response_200_json(v: impl Serialize) -> Response<Body> {
-    return Response::builder().status(200).body(body_json(v)).unwrap();
+    return Response::builder().status(200).header(CONTENT_TYPE, "application/json").body(body_json(v)).unwrap();
 }
 
 pub fn response_301(url: &Uri) -> Response<Body> {
