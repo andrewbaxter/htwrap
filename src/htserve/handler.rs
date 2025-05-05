@@ -1,10 +1,13 @@
 use {
-    flowcontrol::{
-        superif,
-    },
+    flowcontrol::superif,
     http::{
+        header::HOST,
+        uri::{
+            Authority,
+        },
         Response,
         StatusCode,
+        Uri,
     },
     hyper::{
         body::Incoming,
@@ -44,6 +47,7 @@ pub struct HandlerArgs<'a> {
     pub subpath: &'a str,
     /// The query string not including `?`.
     pub query: &'a str,
+    pub url: Uri,
     pub head: &'a http::request::Parts,
     pub body: Incoming,
 }
@@ -144,6 +148,7 @@ impl<O: 'static + Send + Default> Handler<O> for PathRouter<O> {
             peer_addr: args.peer_addr,
             subpath: subpath,
             query: args.query,
+            url: args.url,
             head: args.head,
             body: args.body,
         }).await;
@@ -165,6 +170,32 @@ pub fn root_handle_http_inner<
                         let handler = handler.clone();
                         async move {
                             let (head, body) = req.into_parts();
+                            let url;
+
+                            // Firefox does method line without abs url, need to supplement from `HOST` header
+                            if head.uri.host().unwrap_or_default() == "" {
+                                if let Some(host) = head.headers.get(HOST) {
+                                    let mut parts = head.uri.clone().into_parts();
+                                    parts.authority =
+                                        Some(
+                                            Authority::try_from(
+                                                host.as_bytes(),
+                                            ).map_err(
+                                                |e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                                            )?,
+                                        );
+                                    url =
+                                        Uri::from_parts(
+                                            parts,
+                                        ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                                } else {
+                                    url = head.uri.clone();
+                                }
+                            } else {
+                                url = head.uri.clone();
+                            }
+
+                            // Grab and normalize path/query
                             let path;
                             let query;
                             match head.uri.path_and_query() {
@@ -177,10 +208,13 @@ pub fn root_handle_http_inner<
                                     query = "";
                                 },
                             }
+
+                            // Assemble args
                             return Ok(handler.handle(HandlerArgs {
                                 peer_addr: peer_addr,
                                 subpath: path,
                                 query: query,
+                                url: url,
                                 head: &head,
                                 body: body,
                             }).await) as Result<_, std::io::Error>;

@@ -70,6 +70,7 @@ impl<'a> ForwardedHop<'a> {
 
 pub type Forwarded<'a> = Vec<ForwardedHop<'a>>;
 
+// Parse `X-Forwarded-For`
 pub fn parse_forwarded_for(v: &HeaderValue) -> Result<Vec<(IpAddr, Option<u16>)>, loga::Error> {
     let v =
         String::from_utf8(v.as_bytes().to_vec())
@@ -86,6 +87,7 @@ pub fn parse_forwarded_for(v: &HeaderValue) -> Result<Vec<(IpAddr, Option<u16>)>
     return Ok(out);
 }
 
+// Parse `Forwarded` header value.
 pub fn parse_forwarded<'a>(v: &'a HeaderValue) -> Result<Forwarded<'a>, loga::Error> {
     let mut out = vec![];
     for hop in v.as_bytes().split(|x| *x == b',') {
@@ -215,6 +217,7 @@ pub fn parse_forwarded<'a>(v: &'a HeaderValue) -> Result<Forwarded<'a>, loga::Er
     return Ok(out);
 }
 
+// Parses all `X-Forwarded-*` or `Forwarded` into a list.
 pub fn parse_all_forwarded<'a>(headers: &'a HeaderMap) -> Result<Forwarded<'a>, loga::Error> {
     let mut separate_for = vec![];
     let mut separate_proto = vec![];
@@ -282,6 +285,8 @@ pub fn strip_all_forwarded(headers: &mut HeaderMap) {
     while let Some(_) = headers.remove(http::header::FORWARDED) { }
 }
 
+/// Prepare the current header into a new forwarded hop in order to continue to
+/// forward a message.
 pub fn get_forwarded_current<'a>(req_uri: &'a Uri, peer: SocketAddr) -> ForwardedHop<'a> {
     let host;
     match req_uri.authority() {
@@ -300,6 +305,7 @@ pub fn get_forwarded_current<'a>(req_uri: &'a Uri, peer: SocketAddr) -> Forwarde
     };
 }
 
+/// Turn a list of forwarded hops into `Forwarded` header.
 pub fn render_to_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), loga::Error> {
     let mut out = vec![];
     for (hop_i, hop) in f.iter().enumerate() {
@@ -379,6 +385,7 @@ pub fn render_to_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), loga:
     return Ok(());
 }
 
+/// Turn a list of orwarded hops into a set of `X-Forwarded-*` headers.
 pub fn render_to_x_forwarded(m: &mut HeaderMap, f: &Forwarded) -> Result<(), loga::Error> {
     let mut for_out = vec![];
     for hop in f {
@@ -445,10 +452,21 @@ pub fn get_original_peer_ip(forwarded: &Forwarded, current_peer: IpAddr) -> IpAd
     return current_peer;
 }
 
-/// Get the url the client initially sent the request to, before rewrites due to
-/// forwarding. This uses the first hop from `Forwarded` or the `X-Forwarded`
-/// headers.
-pub fn get_original_base_url(forwarded: &Forwarded) -> Result<Uri, loga::Error> {
-    let url = forwarded.first().context("No forwarding information in headers")?.uri()?;
-    return Ok(url);
+/// Get the absolute base url the client initially sent the request to, before
+/// rewrites due to forwarding. This uses the first hop from `Forwarded` or the
+/// `X-Forwarded` headers. If empty just returns the directly provided url.
+pub fn get_original_base_url(direct: &Uri, forwarded: &Forwarded) -> Result<Uri, loga::Error> {
+    let out = shed!{
+        let Some(first) = forwarded.first() else {
+            break direct.clone();
+        };
+        let url = first.uri()?;
+        break url;
+    };
+    if out.host().unwrap_or_default() == "" {
+        return Err(
+            loga::err(format!("Request doesn't contain enough information to construct absolute base url: {}", out)),
+        );
+    }
+    return Ok(out);
 }
