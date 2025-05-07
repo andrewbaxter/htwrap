@@ -17,7 +17,13 @@ use {
         Hosts,
         Name,
     },
-    http::header::AUTHORIZATION,
+    http::{
+        header::{
+            AUTHORIZATION,
+            HOST,
+        },
+        HeaderValue,
+    },
     http_body_util::{
         BodyExt,
         Full,
@@ -61,9 +67,7 @@ use {
             Ipv6Addr,
         },
         str::FromStr,
-        sync::{
-            LazyLock,
-        },
+        sync::LazyLock,
         time::Duration,
     },
     tokio::{
@@ -433,8 +437,14 @@ pub async fn send<
     log: &Log,
     conn: &'a mut Conn<B>,
     max_time: Duration,
-    req: Request<B>,
+    mut req: Request<B>,
 ) -> Result<(StatusCode, HeaderMap, ContinueSend<'a, B>), loga::Error> {
+    if !req.headers().contains_key(HOST) {
+        if let Some(host) = req.uri().host() {
+            let host = HeaderValue::from_str(host).context("Error setting HOST header")?;
+            req.headers_mut().insert(HOST, host);
+        }
+    }
     let Some((mut conn_send, mut conn_bg)) = conn.inner.take() else {
         return Err(loga::err("Connection already lost"));
     };
