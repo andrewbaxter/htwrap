@@ -125,7 +125,7 @@ pub async fn response_file(
         return Ok(response_404());
     }
     let mut file = File::open(&local_path).await?;
-    if let Some(ranges) = req_headers.get("Accept-Ranges") {
+    if let Some(ranges) = req_headers.get("Range") {
         let Some(ranges_text) = ranges.to_str()?.strip_prefix("bytes=") else {
             return Ok(response_400("Ranges missing bytes= prefix"));
         };
