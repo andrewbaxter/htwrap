@@ -105,6 +105,7 @@ pub async fn response_file(
     req_headers: &HeaderMap,
     mimetype: &str,
     local_path: &Path,
+    add_headers: &HeaderMap,
 ) -> Result<Response<Body>, loga::Error> {
     let meta1 = match local_path.metadata() {
         Ok(m) => m,
@@ -172,14 +173,17 @@ pub async fn response_file(
         if ranges.len() == 1 {
             let (start, end) = ranges.pop().unwrap();
             file.seek(tokio::io::SeekFrom::Start(start as u64)).await?;
+            let mut resp = Response::builder().status(206);
+            for (k, v) in add_headers {
+                resp = resp.header(k, v);
+            }
+            resp = resp.header("Accept-Ranges", "bytes");
+            resp = resp.header("Content-Type", mimetype);
+            resp = resp.header("Cache-Control", format!("max-age=2147483648,immutable"));
+            resp = resp.header("Content-Range", format!("bytes {}-{}/{}", start, end - 1, meta1.len()));
+            resp = resp.header("Content-Length", end - start);
             return Ok(
-                Response::builder()
-                    .status(206)
-                    .header("Accept-Ranges", "bytes")
-                    .header("Content-Type", mimetype)
-                    .header("Cache-Control", format!("max-age=2147483648,immutable"))
-                    .header("Content-Range", format!("bytes {}-{}/{}", start, end - 1, meta1.len()))
-                    .header("Content-Length", end - start)
+                resp
                     .body(
                         http_body_util::StreamBody::new(
                             tokio_util::io::ReaderStream::new(
@@ -205,39 +209,41 @@ pub async fn response_file(
             let ranges = ranges2;
             let footer = format!("\r\n--{}--", boundary).into_bytes();
             content_len += footer.len();
-            return Ok(
-                Response::builder()
-                    .status(206)
-                    .header("Accept-Ranges", "bytes")
-                    .header("Content-Type", format!("multipart/byteranges; boundary={boundary}"))
-                    .header("Content-Length", content_len)
-                    .body(BoxBody::new(http_body_util::StreamBody::new(async_stream::try_stream!{
-                        for (start, end, subheader) in ranges {
-                            yield Frame::data(Bytes::from(subheader));
-                            file.seek(tokio::io::SeekFrom::Start(start as u64)).await?;
-                            let mut remaining = end - start;
-                            while remaining > 0 {
-                                let mut buf = vec![];
-                                let subchunk_len = (8 * 1024 * 1024).min(remaining);
-                                buf.resize(subchunk_len, 0);
-                                file.read(&mut buf).await?;
-                                remaining -= subchunk_len;
-                                yield Frame::data(Bytes::from(buf));
-                            }
-                        }
-                        yield Frame::data(Bytes::from(footer));
-                    })))
-                    .unwrap(),
-            );
+            let mut resp = Response::builder().status(206);
+            for (k, v) in add_headers {
+                resp = resp.header(k, v);
+            }
+            resp = resp.header("Accept-Ranges", "bytes");
+            resp = resp.header("Content-Type", format!("multipart/byteranges; boundary={boundary}"));
+            resp = resp.header("Content-Length", content_len);
+            return Ok(resp.body(BoxBody::new(http_body_util::StreamBody::new(async_stream::try_stream!{
+                for (start, end, subheader) in ranges {
+                    yield Frame::data(Bytes::from(subheader));
+                    file.seek(tokio::io::SeekFrom::Start(start as u64)).await?;
+                    let mut remaining = end - start;
+                    while remaining > 0 {
+                        let mut buf = vec![];
+                        let subchunk_len = (8 * 1024 * 1024).min(remaining);
+                        buf.resize(subchunk_len, 0);
+                        file.read(&mut buf).await?;
+                        remaining -= subchunk_len;
+                        yield Frame::data(Bytes::from(buf));
+                    }
+                }
+                yield Frame::data(Bytes::from(footer));
+            }))).unwrap());
         }
     } else {
+        let mut resp = Response::builder().status(200);
+        for (k, v) in add_headers {
+            resp = resp.header(k, v);
+        }
+        resp = resp.header("Accept-Ranges", "bytes");
+        resp = resp.header("Content-Type", mimetype);
+        resp = resp.header("Cache-Control", format!("max-age=2147483648,immutable"));
+        resp = resp.header("Content-Length", meta1.len().to_string());
         return Ok(
-            Response::builder()
-                .status(200)
-                .header("Accept-Ranges", "bytes")
-                .header("Content-Type", mimetype)
-                .header("Cache-Control", format!("max-age=2147483648,immutable"))
-                .header("Content-Length", meta1.len().to_string())
+            resp
                 .body(
                     http_body_util::StreamBody::new(
                         tokio_util::io::ReaderStream::new(file).map_ok(Frame::data),
