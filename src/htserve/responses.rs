@@ -89,6 +89,10 @@ pub fn response_401() -> Response<Body> {
     return Response::builder().status(401).body(body_empty()).unwrap();
 }
 
+pub fn response_403() -> Response<Body> {
+    return Response::builder().status(403).body(body_empty()).unwrap();
+}
+
 pub fn response_429() -> Response<Body> {
     return Response::builder().status(429).body(body_empty()).unwrap();
 }
