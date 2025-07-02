@@ -86,6 +86,69 @@ use {
     tower_service::Service,
 };
 
+#[derive(Clone, Copy)]
+pub struct Limits {
+    /// Maximum time to resolve host names to IPs
+    pub resolve_time: Duration,
+    /// Maximum time to open tcp connection
+    pub connect_time: Duration,
+    /// Maximum time to send message and receive headers
+    pub read_header_time: Duration,
+    /// Maximum time to read full body
+    pub read_body_time: Duration,
+    /// Maximum size of body to read
+    pub read_body_size: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        return Self {
+            resolve_time: Duration::from_secs(10),
+            connect_time: Duration::from_secs(10),
+            read_header_time: Duration::from_secs(10),
+            read_body_time: Duration::from_secs(30),
+            read_body_size: 16 * 1024 * 1024,
+        };
+    }
+}
+
+impl Limits {
+    pub fn with_resolve_time(self, time: Duration) -> Self {
+        return Self {
+            resolve_time: time,
+            ..Default::default()
+        };
+    }
+
+    pub fn with_connect_time(self, time: Duration) -> Self {
+        return Self {
+            connect_time: time,
+            ..Default::default()
+        };
+    }
+
+    pub fn with_read_header_time(self, time: Duration) -> Self {
+        return Self {
+            read_header_time: time,
+            ..Default::default()
+        };
+    }
+
+    pub fn with_read_body_time(self, time: Duration) -> Self {
+        return Self {
+            read_body_time: time,
+            ..Default::default()
+        };
+    }
+
+    pub fn with_read_body_size(self, size: usize) -> Self {
+        return Self {
+            read_body_size: size,
+            ..Default::default()
+        };
+    }
+}
+
 /// Get a once-initialized rustls native roots client config, avoiding scanning the
 /// filesystem multiple times.
 pub fn default_tls() -> rustls::ClientConfig {
@@ -215,7 +278,7 @@ impl From<IpAddr> for Ips {
 }
 
 /// Resolve ipv4 and ipv6 addresses for a url using hickory.
-pub async fn resolve(host: &Host) -> Result<Ips, loga::Error> {
+pub async fn resolve(limits: Limits, host: &Host) -> Result<Ips, loga::Error> {
     let mut ipv4s = vec![];
     let mut ipv6s = vec![];
     match host {
@@ -264,6 +327,7 @@ pub async fn resolve(host: &Host) -> Result<Ips, loga::Error> {
                     ::system_conf
                     ::read_system_conf().context("Error reading system dns resolver config for http request")?;
                 hickory_options.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
+                hickory_options.timeout = limits.resolve_time;
                 for ip in hickory_resolver::TokioAsyncResolver::tokio(hickory_config, hickory_options)
                     .lookup_ip(&host)
                     .await
@@ -298,7 +362,14 @@ pub async fn connect_ips<
     D: hyper::body::Buf + Send,
     E: 'static + std::error::Error + Send + Sync,
     B: 'static + http_body::Body<Data = D, Error = E>,
->(ips: Ips, tls: rustls::ClientConfig, scheme: String, host: Host, port: u16) -> Result<Conn<B>, loga::Error> {
+>(
+    limits: Limits,
+    ips: Ips,
+    tls: rustls::ClientConfig,
+    scheme: String,
+    host: Host,
+    port: u16,
+) -> Result<Conn<B>, loga::Error> {
     let mut bg = vec![];
     let (found_tx, mut found_rx) = mpsc::channel(1);
     for ips in [
@@ -332,7 +403,7 @@ pub async fn connect_ips<
                         );
                     };
                     let res = select!{
-                        _ = sleep(Duration::from_secs(10)) => Err(loga::err("Timeout connecting")),
+                        _ = sleep(limits.connect_time) => Err(loga::err("Timeout connecting")),
                         res = connect => res,
                     };
                     match res {
@@ -392,12 +463,12 @@ pub async fn connect<
     D: hyper::body::Buf + Send,
     E: 'static + std::error::Error + Send + Sync,
     B: 'static + http_body::Body<Data = D, Error = E>,
->(base_url: &Uri) -> Result<Conn<B>, loga::Error> {
+>(limits: Limits, base_url: &Uri) -> Result<Conn<B>, loga::Error> {
     let log = &Log::new().fork(ea!(url = base_url));
     let (scheme, host, port) = uri_parts(base_url).stack_context(log, "Incomplete url")?;
-    let ips = resolve(&host).await.stack_context(log, "Error resolving ips for url")?;
+    let ips = resolve(limits, &host).await.stack_context(log, "Error resolving ips for url")?;
     return Ok(
-        connect_ips(ips, default_tls(), scheme, host, port)
+        connect_ips(limits, ips, default_tls(), scheme, host, port)
             .await
             .stack_context(log, "Failed to establish connection")?,
     );
@@ -408,12 +479,12 @@ pub async fn connect_with_tls<
     D: hyper::body::Buf + Send,
     E: 'static + std::error::Error + Send + Sync,
     B: 'static + http_body::Body<Data = D, Error = E>,
->(base_url: &Uri, tls: rustls::ClientConfig) -> Result<Conn<B>, loga::Error> {
+>(limits: Limits, base_url: &Uri, tls: rustls::ClientConfig) -> Result<Conn<B>, loga::Error> {
     let log = &Log::new().fork(ea!(url = base_url));
     let (scheme, host, port) = uri_parts(base_url).stack_context(log, "Incomplete url")?;
-    let ips = resolve(&host).await.stack_context(log, "Error resolving ips for url")?;
+    let ips = resolve(limits, &host).await.stack_context(log, "Error resolving ips for url")?;
     return Ok(
-        connect_ips(ips, tls, scheme, host, port).await.stack_context(log, "Failed to establish connection")?,
+        connect_ips(limits, ips, tls, scheme, host, port).await.stack_context(log, "Failed to establish connection")?,
     );
 }
 
@@ -435,8 +506,8 @@ pub async fn send<
     B: 'static + http_body::Body<Data = D, Error = E>,
 >(
     log: &Log,
+    limits: Limits,
     conn: &'a mut Conn<B>,
-    max_time: Duration,
     mut req: Request<B>,
 ) -> Result<(StatusCode, HeaderMap, ContinueSend<'a, B>), loga::Error> {
     if !req.headers().contains_key(HOST) {
@@ -468,7 +539,7 @@ pub async fn send<
         }));
     };
     let (status, headers, continue_send) = select!{
-        _ = sleep(max_time) => {
+        _ = sleep(limits.read_header_time) => {
             return Err(loga::err("Timeout sending request and waiting for headers from server"));
         }
         x = read => x ?,
@@ -479,7 +550,7 @@ pub async fn send<
         ea!(method = method, url = url, status = status, headers = headers.dbg_str()),
     );
     if !status.is_success() {
-        match receive(continue_send, 10 * 1024, Duration::from_secs(30)).await {
+        match receive(limits, continue_send).await {
             Ok(body) => {
                 return Err(
                     loga::err_with(
@@ -561,9 +632,9 @@ pub async fn receive<
     D: hyper::body::Buf + Send,
     E: 'static + std::error::Error + Send + Sync,
     B: 'static + http_body::Body<Data = D, Error = E>,
->(mut continue_send: ContinueSend<'a, B>, max_size: usize, max_time: Duration) -> Result<Vec<u8>, loga::Error> {
+>(limits: Limits, mut continue_send: ContinueSend<'a, B>) -> Result<Vec<u8>, loga::Error> {
     let read = async move {
-        let work = Limited::new(continue_send.body, max_size).collect();
+        let work = Limited::new(continue_send.body, limits.read_body_size).collect();
         let body = select!{
             _ =& mut continue_send.conn_bg => {
                 return Err(loga::err("Connection failed while reading body"));
@@ -573,7 +644,7 @@ pub async fn receive<
         return Ok((body, continue_send.conn_send, continue_send.conn_bg));
     };
     let (body, conn_send, conn_bg) = select!{
-        _ = sleep(max_time) => {
+        _ = sleep(limits.read_body_time) => {
             return Err(loga::err("Timeout waiting for response from server"));
         }
         x = read => x ?,
@@ -587,24 +658,9 @@ pub async fn send_simple<
     D: hyper::body::Buf + Send,
     E: 'static + std::error::Error + Send + Sync,
     B: 'static + http_body::Body<Data = D, Error = E>,
->(
-    log: &Log,
-    conn: &mut Conn<B>,
-    max_size: usize,
-    max_time: Duration,
-    req: Request<B>,
-) -> Result<Vec<u8>, loga::Error> {
-    let work = async {
-        let (code, _, continue_send) = send(log, conn, max_time, req).await?;
-        return Ok((code, receive(continue_send, max_size, max_time).await?)) as
-            Result<(StatusCode, Vec<u8>), loga::Error>;
-    };
-    let (code, body) = select!{
-        _ = sleep(max_time) => {
-            return Err(loga::err("Timeout waiting for response from server"));
-        }
-        x = work => x ?,
-    };
+>(log: &Log, limits: Limits, conn: &mut Conn<B>, req: Request<B>) -> Result<Vec<u8>, loga::Error> {
+    let (code, _, continue_send) = send(log, limits, conn, req).await?;
+    let body = receive(limits, continue_send).await?;
     if !code.is_success() {
         return Err(
             loga::err_with("Received invalid status in http response", ea!(body = String::from_utf8_lossy(&body))),
@@ -616,11 +672,11 @@ pub async fn send_simple<
 /// Send a `POST` request, return body as `Vec<u8>`.
 pub async fn post(
     log: &Log,
+    limits: Limits,
     conn: &mut Conn,
     url: &Uri,
     headers: &HashMap<String, String>,
     body: Vec<u8>,
-    max_size: usize,
 ) -> Result<Vec<u8>, loga::Error> {
     let req = Request::builder();
     let mut req = req.method("POST").uri(url.clone());
@@ -633,7 +689,7 @@ pub async fn post(
         ea!(method = "POST", url = url, headers = req.headers_ref().dbg_str(), body = String::from_utf8_lossy(&body)),
     );
     return Ok(
-        send_simple(log, conn, max_size, Duration::from_secs(10), req.body(Full::new(Bytes::from(body))).unwrap())
+        send_simple(log, limits, conn, req.body(Full::new(Bytes::from(body))).unwrap())
             .await
             .context_with("Error sending POST", ea!(url = url))?,
     );
@@ -645,13 +701,13 @@ pub async fn post_json<
     T: DeserializeOwned,
 >(
     log: &Log,
+    limits: Limits,
     conn: &mut Conn,
     url: &Uri,
     headers: &HashMap<String, String>,
     body: impl Serialize,
-    max_size: usize,
 ) -> Result<T, loga::Error> {
-    let res = post(log, conn, url, headers, serde_json::to_vec(&body).unwrap(), max_size).await?;
+    let res = post(log, limits, conn, url, headers, serde_json::to_vec(&body).unwrap()).await?;
     return Ok(
         serde_json::from_slice(
             &res,
@@ -668,10 +724,10 @@ pub fn auth_token_headers(token: &str) -> HashMap<String, String> {
 /// Make a GET request, return body as `Vec<u8>`.
 pub async fn get(
     log: &Log,
+    limits: Limits,
     conn: &mut Conn,
     url: &Uri,
     headers: &HashMap<String, String>,
-    max_size: usize,
 ) -> Result<Vec<u8>, loga::Error> {
     let req = Request::builder();
     const METHOD: &'static str = "GET";
@@ -680,13 +736,7 @@ pub async fn get(
         req = req.header(k, v);
     }
     return Ok(
-        send_simple(
-            log,
-            conn,
-            max_size,
-            Duration::from_secs(10),
-            req.body(Full::<Bytes>::new(Bytes::new())).unwrap(),
-        )
+        send_simple(log, limits, conn, req.body(Full::<Bytes>::new(Bytes::new())).unwrap())
             .await
             .context_with("Error sending GET", ea!(url = url))?,
     );
@@ -695,12 +745,12 @@ pub async fn get(
 /// Make a GET request, return body as String.
 pub async fn get_text(
     log: &Log,
+    limits: Limits,
     conn: &mut Conn,
     url: &Uri,
     headers: &HashMap<String, String>,
-    max_size: usize,
 ) -> Result<String, loga::Error> {
-    let body = get(log, conn, url, headers, max_size).await?;
+    let body = get(log, limits, conn, url, headers).await?;
     return Ok(
         String::from_utf8(
             body,
@@ -718,12 +768,12 @@ pub async fn get_json<
     T: DeserializeOwned,
 >(
     log: &Log,
+    limits: Limits,
     conn: &mut Conn,
     url: &Uri,
     headers: &HashMap<String, String>,
-    max_size: usize,
 ) -> Result<T, loga::Error> {
-    let res = get(log, conn, url, headers, max_size).await?;
+    let res = get(log, limits, conn, url, headers).await?;
     return Ok(
         serde_json::from_slice(
             &res,
@@ -734,10 +784,10 @@ pub async fn get_json<
 /// Make a `DELETE` request, return body as `Vec<u8>`.
 pub async fn delete(
     log: &Log,
+    limits: Limits,
     conn: &mut Conn,
     url: &Uri,
     headers: &HashMap<String, String>,
-    max_size: usize,
 ) -> Result<Vec<u8>, loga::Error> {
     let req = Request::builder();
     const METHOD: &'static str = "DELETE";
@@ -746,13 +796,7 @@ pub async fn delete(
         req = req.header(k, v);
     }
     return Ok(
-        send_simple(
-            log,
-            conn,
-            max_size,
-            Duration::from_secs(10),
-            req.body(Full::<Bytes>::new(Bytes::new())).unwrap(),
-        )
+        send_simple(log, limits, conn, req.body(Full::<Bytes>::new(Bytes::new())).unwrap())
             .await
             .context_with("Error sending DELETE", ea!(url = url))?,
     );
