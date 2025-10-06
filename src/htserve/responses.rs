@@ -2,10 +2,15 @@ use {
     futures::TryStreamExt,
     http::{
         header::{
+            ACCEPT_RANGES,
+            CACHE_CONTROL,
+            CONTENT_LENGTH,
+            CONTENT_RANGE,
             CONTENT_TYPE,
             LOCATION,
         },
         HeaderMap,
+        HeaderValue,
         Response,
         StatusCode,
         Uri,
@@ -105,10 +110,15 @@ pub fn response_503_text(message: impl ToString) -> Response<Body> {
     return Response::builder().status(503).body(body_full(message.to_string().into_bytes())).unwrap();
 }
 
+pub fn add_header_cache_immutable(headers: &mut HeaderMap) {
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("max-age=2147483648,immutable"));
+}
+
 pub async fn response_file(
     req_headers: &HeaderMap,
     mimetype: &str,
     local_path: &Path,
+    immutable: bool,
     add_headers: &HeaderMap,
 ) -> Result<Response<Body>, loga::Error> {
     let meta1 = match local_path.metadata() {
@@ -181,11 +191,13 @@ pub async fn response_file(
             for (k, v) in add_headers {
                 resp = resp.header(k, v);
             }
-            resp = resp.header("Accept-Ranges", "bytes");
-            resp = resp.header("Content-Type", mimetype);
-            resp = resp.header("Cache-Control", format!("max-age=2147483648,immutable"));
-            resp = resp.header("Content-Range", format!("bytes {}-{}/{}", start, end - 1, meta1.len()));
-            resp = resp.header("Content-Length", end - start);
+            resp = resp.header(ACCEPT_RANGES, "bytes");
+            resp = resp.header(CONTENT_TYPE, mimetype);
+            if immutable {
+                add_header_cache_immutable(resp.headers_mut().unwrap());
+            }
+            resp = resp.header(CONTENT_RANGE, format!("bytes {}-{}/{}", start, end - 1, meta1.len()));
+            resp = resp.header(CONTENT_LENGTH, end - start);
             return Ok(
                 resp
                     .body(
@@ -217,9 +229,9 @@ pub async fn response_file(
             for (k, v) in add_headers {
                 resp = resp.header(k, v);
             }
-            resp = resp.header("Accept-Ranges", "bytes");
-            resp = resp.header("Content-Type", format!("multipart/byteranges; boundary={boundary}"));
-            resp = resp.header("Content-Length", content_len);
+            resp = resp.header(ACCEPT_RANGES, "bytes");
+            resp = resp.header(CONTENT_TYPE, format!("multipart/byteranges; boundary={boundary}"));
+            resp = resp.header(CONTENT_LENGTH, content_len);
             return Ok(resp.body(BoxBody::new(http_body_util::StreamBody::new(async_stream::try_stream!{
                 for (start, end, subheader) in ranges {
                     yield Frame::data(Bytes::from(subheader));
@@ -242,10 +254,12 @@ pub async fn response_file(
         for (k, v) in add_headers {
             resp = resp.header(k, v);
         }
-        resp = resp.header("Accept-Ranges", "bytes");
-        resp = resp.header("Content-Type", mimetype);
-        resp = resp.header("Cache-Control", format!("max-age=2147483648,immutable"));
-        resp = resp.header("Content-Length", meta1.len().to_string());
+        resp = resp.header(ACCEPT_RANGES, "bytes");
+        resp = resp.header(CONTENT_TYPE, mimetype);
+        if immutable {
+            add_header_cache_immutable(resp.headers_mut().unwrap());
+        }
+        resp = resp.header(CONTENT_LENGTH, meta1.len().to_string());
         return Ok(
             resp
                 .body(
