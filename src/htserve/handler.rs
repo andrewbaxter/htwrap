@@ -1,19 +1,20 @@
 use {
-    flowcontrol::{
-        superif,
-    },
+    flowcontrol::superif,
     http::{
+        Response,
+        StatusCode,
+        Uri,
         header::HOST,
         uri::{
             Authority,
             Scheme,
         },
-        Response,
-        StatusCode,
-        Uri,
     },
     hyper::{
-        body::Incoming,
+        body::{
+            Buf,
+            Incoming,
+        },
         service::service_fn,
     },
     hyper_util::rt::{
@@ -25,8 +26,8 @@ use {
         ResultContext,
     },
     rustls::{
-        server::ResolvesServerCert,
         ServerConfig,
+        server::ResolvesServerCert,
     },
     std::{
         collections::BTreeMap,
@@ -160,7 +161,7 @@ impl<O: 'static + Send + Default> Handler<O> for PathRouter<O> {
 
 pub fn root_handle_http_inner<
     I: 'static + Send + AsyncRead + AsyncWrite + Unpin,
-    OD: 'static + Send,
+    OD: 'static + Send + Buf,
     OE: 'static + Send + Sync + std::error::Error,
     O: 'static + Send + http_body::Body<Data = OD, Error = OE>,
 >(log: &Log, https: bool, peer_addr: SocketAddr, stream: I, handler: Arc<dyn Handler<O>>) {
@@ -269,7 +270,7 @@ pub fn root_handle_http_inner<
 }
 
 pub async fn root_handle_http<
-    OD: 'static + Send,
+    OD: 'static + Send + Buf,
     OE: 'static + Send + Sync + std::error::Error,
     O: 'static + Send + http_body::Body<Data = OD, Error = OE>,
 >(log: &Log, handler: Arc<dyn Handler<O>>, stream: TcpStream) -> Result<(), loga::Error> {
@@ -295,7 +296,7 @@ pub fn tls_acceptor(certs: Arc<dyn ResolvesServerCert>) -> TlsAcceptor {
 }
 
 pub async fn root_handle_https<
-    OD: 'static + Send,
+    OD: 'static + Send + Buf,
     OE: 'static + Send + Sync + std::error::Error,
     O: 'static + Send + http_body::Body<Data = OD, Error = OE>,
 >(
