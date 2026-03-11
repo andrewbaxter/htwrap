@@ -459,7 +459,7 @@ pub fn get_original_base_url(direct: &Uri, forwarded: &Forwarded) -> Result<Uri,
     let out = shed!{
         let Some(first) = forwarded.first() else {
             let mut parts = direct.clone().into_parts();
-            parts.path_and_query = None;
+            parts.path_and_query = Some(http::uri::PathAndQuery::from_static(""));
             break Uri::from_parts(parts).unwrap();
         };
         let url = first.uri()?;
