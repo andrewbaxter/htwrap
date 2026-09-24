@@ -30,7 +30,7 @@ use {
         server::ResolvesServerCert,
     },
     std::{
-        collections::BTreeMap,
+        collections::HashMap,
         error::Error,
         net::SocketAddr,
         sync::Arc,
@@ -107,7 +107,7 @@ fn check_path_router_key(k: &str) -> Result<(), String> {
 }
 
 /// A minimal path-based request router using the `Handler` trait.
-pub struct PathRouter<O>(BTreeMap<String, Box<dyn Handler<O>>>);
+pub struct PathRouter<O>(HashMap<String, Box<dyn Handler<O>>>);
 
 impl<O> Default for PathRouter<O> {
     fn default() -> Self {
@@ -116,7 +116,7 @@ impl<O> Default for PathRouter<O> {
 }
 
 impl<O> PathRouter<O> {
-    pub fn new(routes: BTreeMap<String, Box<dyn Handler<O>>>) -> Result<Self, Vec<String>> {
+    pub fn new(routes: HashMap<String, Box<dyn Handler<O>>>) -> Result<Self, Vec<String>> {
         let mut errors = vec![];
         for key in routes.keys() {
             if let Err(e) = check_path_router_key(&key) {
@@ -142,12 +142,17 @@ impl<O> PathRouter<O> {
 #[async_trait::async_trait]
 impl<O: 'static + Send + Default> Handler<O> for PathRouter<O> {
     async fn handle(&self, args: HandlerArgs<'_>) -> Response<O> {
-        let Some((prefix, subhandler)) = self.0.range(..=args.subpath.to_string()).rev().next() else {
-            return Response::builder().status(StatusCode::NOT_FOUND).body(Default::default()).unwrap();
+        let mut prefix = args.subpath;
+        let subhandler = loop {
+            if let Some(subhandler) = self.0.get(prefix) {
+                break subhandler;
+            }
+            let Some(sep) = prefix.rfind('/') else {
+                return Response::builder().status(StatusCode::NOT_FOUND).body(Default::default()).unwrap();
+            };
+            prefix = &prefix[..sep];
         };
-        let Some(subpath) = args.subpath.strip_prefix(prefix) else {
-            return Response::builder().status(StatusCode::NOT_FOUND).body(Default::default()).unwrap();
-        };
+        let subpath = &args.subpath[prefix.len()..];
         return subhandler.handle(HandlerArgs {
             peer_addr: args.peer_addr,
             subpath: subpath,
