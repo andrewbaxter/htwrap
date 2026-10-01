@@ -194,12 +194,7 @@ pub fn root_handle_http_inner<
                             if let Some(host1) = head.headers.get(HOST) {
                                 authority.extend(host1.as_bytes());
                             } else if let Some(a) = &parts.authority {
-                                authority.extend(a.host().as_bytes());
-                            }
-                            if let Some(a) = parts.authority {
-                                if let Some(port) = a.port_u16() {
-                                    authority.extend(port.to_string().as_bytes());
-                                }
+                                authority.extend(a.as_str().rsplit('@').next().unwrap().as_bytes());
                             }
                             parts.authority =
                                 Some(
