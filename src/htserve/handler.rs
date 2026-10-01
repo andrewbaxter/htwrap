@@ -174,7 +174,7 @@ pub fn root_handle_http_inner<
     tokio::task::spawn(async move {
         match async {
             match hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-                .serve_connection(TokioIo::new(stream), service_fn({
+                .serve_connection_with_upgrades(TokioIo::new(stream), service_fn({
                     move |req| {
                         let handler = handler.clone();
                         async move {
