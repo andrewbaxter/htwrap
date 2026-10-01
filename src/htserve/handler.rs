@@ -289,7 +289,11 @@ pub async fn root_handle_http<
 
 pub fn tls_acceptor(certs: Arc<dyn ResolvesServerCert>) -> TlsAcceptor {
     return TlsAcceptor::from(Arc::new({
-        let mut server_config = ServerConfig::builder().with_no_client_auth().with_cert_resolver(certs);
+        let mut server_config = ServerConfig::builder_with_provider(crate::tls::crypto_provider())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_cert_resolver(certs);
         server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec(), b"http/1.0".to_vec()];
         server_config
     }));

@@ -10,12 +10,13 @@ use {
         proto::{
             op::Query,
             rr::{
+                Name,
                 RData,
                 RecordType,
             },
         },
         Hosts,
-        Name,
+        TokioResolver,
     },
     http::{
         header::{
@@ -42,6 +43,7 @@ use {
     },
     hyper_rustls::{
         ConfigBuilderExt,
+        FixedServerNameResolver,
         HttpsConnectorBuilder,
     },
     loga::{
@@ -52,9 +54,12 @@ use {
     },
     rand::{
         seq::SliceRandom,
-        thread_rng,
+        rng,
     },
-    rustls::ClientConfig,
+    rustls::{
+        pki_types::ServerName,
+        ClientConfig,
+    },
     serde::{
         de::DeserializeOwned,
         Serialize,
@@ -154,7 +159,9 @@ impl Limits {
 pub fn default_tls() -> rustls::ClientConfig {
     static S: LazyLock<rustls::ClientConfig> =
         LazyLock::new(
-            || ClientConfig::builder()
+            || ClientConfig::builder_with_provider(crate::tls::crypto_provider())
+                .with_safe_default_protocol_versions()
+                .unwrap()
                 .with_native_roots()
                 .context("Error loading native roots")
                 .unwrap()
@@ -290,7 +297,7 @@ pub async fn resolve(limits: Limits, host: &Host) -> Result<Ips, loga::Error> {
         },
         Host::Name(host) => {
             let host = format!("{}.", host);
-            static HOSTS: LazyLock<Hosts> = LazyLock::new(|| Hosts::new());
+            static HOSTS: LazyLock<Hosts> = LazyLock::new(|| Hosts::from_system().unwrap_or_default());
             shed!{
                 'found_hosts _;
                 // Check /etc/hosts
@@ -300,8 +307,8 @@ pub async fn resolve(limits: Limits, host: &Host) -> Result<Ips, loga::Error> {
                     };
                     let mut found_etc_hosts = false;
                     if let Some(res) = HOSTS.lookup_static_host(&Query::query(name.clone(), RecordType::A)) {
-                        for rec in res {
-                            let RData::A(rec) = rec else {
+                        for rec in res.answers() {
+                            let RData::A(rec) = &rec.data else {
                                 continue;
                             };
                             ipv4s.push(rec.0);
@@ -309,8 +316,8 @@ pub async fn resolve(limits: Limits, host: &Host) -> Result<Ips, loga::Error> {
                         }
                     };
                     if let Some(res) = HOSTS.lookup_static_host(&Query::query(name.clone(), RecordType::AAAA)) {
-                        for rec in res {
-                            let RData::AAAA(rec) = rec else {
+                        for rec in res.answers() {
+                            let RData::AAAA(rec) = &rec.data else {
                                 continue;
                             };
                             ipv6s.push(rec.0);
@@ -328,7 +335,10 @@ pub async fn resolve(limits: Limits, host: &Host) -> Result<Ips, loga::Error> {
                     ::read_system_conf().context("Error reading system dns resolver config for http request")?;
                 hickory_options.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
                 hickory_options.timeout = limits.resolve_time;
-                for ip in hickory_resolver::TokioAsyncResolver::tokio(hickory_config, hickory_options)
+                for ip in TokioResolver::builder_with_config(hickory_config, Default::default())
+                    .with_options(hickory_options)
+                    .build()
+                    .context("Error building dns resolver for http request")?
                     .lookup_ip(&host)
                     .await
                     .context("Failed to look up lookup host ip addresses")? {
@@ -345,7 +355,7 @@ pub async fn resolve(limits: Limits, host: &Host) -> Result<Ips, loga::Error> {
         },
     };
     {
-        let mut r = thread_rng();
+        let mut r = rng();
         ipv4s.shuffle(&mut r);
         ipv6s.shuffle(&mut r);
     }
@@ -385,11 +395,19 @@ pub async fn connect_ips<
                 let mut errs = vec![];
                 for ip in &ips {
                     let connect = async {
+                        let server_name =
+                            ServerName::try_from(host.to_string())
+                                .map_err(
+                                    |e| loga::err_with(
+                                        "Invalid TLS server name",
+                                        ea!(err = e.to_string(), host = host),
+                                    ),
+                                )?;
                         return Ok(
                             HttpsConnectorBuilder::new()
                                 .with_tls_config(tls.clone())
                                 .https_or_http()
-                                .with_server_name(host.to_string())
+                                .with_server_name_resolver(FixedServerNameResolver::new(server_name))
                                 .enable_http1()
                                 .build()
                                 .call(Uri::from_str(&format!("{}://{}:{}", scheme, ip.as_url_host(), port)).unwrap())
